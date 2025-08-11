@@ -1,7 +1,8 @@
-# --- ФАЙЛ: main.py (Версия с PostgreSQL) ---
+# --- ФАЙЛ: main.py (ФІНАЛЬНА ВЕРСІЯ З ВИПРАВЛЕННЯМ SSL) ---
 
 import logging
-import psycopg2 # <-- Используем новую библиотеку
+import psycopg2
+from urllib.parse import urlparse
 from datetime import datetime
 from collections import defaultdict
 from functools import wraps
@@ -22,9 +23,8 @@ from telegram.error import BadRequest
 
 # --- ⚙️ НАСТРОЙКИ ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-# <-- ВАЖНО: Берем URL базы данных из переменных окружения
 DATABASE_URL = os.environ.get('DATABASE_URL')
-DB_NAME = "debt_book_v2.db" # Это имя больше не используется для файла
+DB_NAME = "debt_book_v2.db"
 
 # --- 🎨 ЭМОДЗИ И СТРОКИ ---
 EMOJI = { "money": "💰", "repay": "💸", "split": "🍕", "status": "📊", "my_debts": "👤", "history": "📜", "ok": "✅", "cancel": "❌", "back": "↩️", "user": "👤", "warning": "⚠️", "party": "🎉", "lock": "🔒"}
@@ -38,15 +38,30 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 (REPAY_SELECT_DEBTOR, REPAY_SELECT_CREDITOR, REPAY_GET_AMOUNT) = range(4, 7)
 (SPLIT_SELECT_PAYER, SPLIT_GET_AMOUNT, SPLIT_GET_COMMENT) = range(7, 10)
 
-# --- 🗃️ КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (PostgreSQL) ---
+# --- 🗃️ КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (PostgreSQL - ВИПРАВЛЕНО SSL) ---
 class Database:
     def __init__(self, conn_url):
         if not conn_url:
             raise ValueError("DATABASE_URL не найден. Убедитесь, что он добавлен в Environment Variables.")
-        print("Connecting to PostgreSQL database...")
-        self.conn = psycopg2.connect(conn_url)
-        self.init_db()
-        print("Database connection successful.")
+        
+        print("Connecting to PostgreSQL database with SSL require...")
+        try:
+            # Розбираємо URL, щоб додати параметр sslmode в коді
+            result = urlparse(conn_url)
+            
+            self.conn = psycopg2.connect(
+                dbname=result.path[1:],
+                user=result.username,
+                password=result.password,
+                host=result.hostname,
+                port=result.port,
+                sslmode='require' # <--- ОСЬ КЛЮЧОВЕ ВИПРАВЛЕННЯ
+            )
+            self.init_db()
+            print("Database connection successful.")
+        except psycopg2.OperationalError as e:
+            print(f"!!! КРИТИЧНА ПОМИЛКА ПІДКЛЮЧЕННЯ ДО БАЗИ: {e}")
+            raise
 
     def execute(self, query, params=(), fetch=None):
         with self.conn.cursor() as cur:
@@ -97,10 +112,9 @@ class Database:
     def get_all_transactions(self, chat_id):
         return self.execute("SELECT id, creditor_id, debtor_id, amount, comment, timestamp FROM transactions WHERE chat_id=%s ORDER BY timestamp ASC", (chat_id,), fetch="all")
 
-# <-- Инициализируем класс с URL из настроек -->
 db = Database(DATABASE_URL)
 
-# --- 🧑‍🔧 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (исправленный синтаксис) ---
+# --- 🧑‍🔧 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def group_only(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -333,6 +347,7 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 text += f"`{escape_markdown(date)}`: {get_user_mention(d_id, chat_id)} {action_text} {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH*{final_comment}\n"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
     await query.answer()
+
 app = Flask('')
 @app.route('/')
 def home(): return "I'm alive!"
