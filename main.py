@@ -1,4 +1,4 @@
-# --- ФАЙЛ: main.py (ФІНАЛЬНА ВЕРСІЯ З ВИПРАВЛЕННЯМ SSL) ---
+# --- ФАЙЛ: main.py (ФІНАЛЬНА ВЕРСІЯ З ПІНГОМ БАЗИ ДАНИХ) ---
 
 import logging
 import psycopg2
@@ -8,6 +8,8 @@ from collections import defaultdict
 from functools import wraps
 import os
 from threading import Thread
+import time # <-- Додано для пінгу
+
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, constants
 from telegram.ext import (
@@ -38,7 +40,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 (REPAY_SELECT_DEBTOR, REPAY_SELECT_CREDITOR, REPAY_GET_AMOUNT) = range(4, 7)
 (SPLIT_SELECT_PAYER, SPLIT_GET_AMOUNT, SPLIT_GET_COMMENT) = range(7, 10)
 
-# --- 🗃️ КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (PostgreSQL - ВИПРАВЛЕНО SSL) ---
+# --- 🗃️ КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (PostgreSQL) ---
 class Database:
     def __init__(self, conn_url):
         if not conn_url:
@@ -46,16 +48,14 @@ class Database:
         
         print("Connecting to PostgreSQL database with SSL require...")
         try:
-            # Розбираємо URL, щоб додати параметр sslmode в коді
             result = urlparse(conn_url)
-            
             self.conn = psycopg2.connect(
                 dbname=result.path[1:],
                 user=result.username,
                 password=result.password,
                 host=result.hostname,
                 port=result.port,
-                sslmode='require' # <--- ОСЬ КЛЮЧОВЕ ВИПРАВЛЕННЯ
+                sslmode='require'
             )
             self.init_db()
             print("Database connection successful.")
@@ -374,6 +374,30 @@ def main():
 
     print("Бот успешно запущен и работает..."); application.run_polling()
 
+# --- НОВИЙ, ПРАВИЛЬНИЙ БЛОК ЗАПУСКА З ПІНГОМ ---
+def ping_database():
+    """Функція, яка не дає базі даних заснути."""
+    while True:
+        try:
+            print("[DB Ping] Sending keep-alive query...")
+            # Виконуємо простий запит, який нічого не змінює
+            db.execute("SELECT 1")
+            print("[DB Ping] Keep-alive query successful.")
+        except Exception as e:
+            print(f"[DB Ping] Error during keep-alive query: {e}")
+        # Чекаємо 10 хвилин (600 секунд)
+        time.sleep(600)
+
 if __name__ == "__main__":
-    print("Запуск веб-сервера для поддержания активности..."); flask_thread = Thread(target=run_flask); flask_thread.start()
-    print("Запуск телеграм-бота..."); main()
+    print("Запуск веб-сервера для поддержания активности...")
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    print("Запуск пінгу бази даних для підтримки активності...")
+    db_ping_thread = Thread(target=ping_database)
+    db_ping_thread.daemon = True
+    db_ping_thread.start()
+
+    print("Запуск телеграм-бота...")
+    main()
