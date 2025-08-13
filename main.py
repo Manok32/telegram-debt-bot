@@ -64,31 +64,44 @@ class Database:
             raise
 
     def execute(self, query, params=(), fetch=None):
-        with self.conn.cursor() as cur:
+        # Перевірка з'єднання перед кожним запитом
+        try:
+            cur = self.conn.cursor()
             cur.execute(query, params)
-            self.conn.commit()
-            if fetch == "one": return cur.fetchone()
-            if fetch == "all": return cur.fetchall()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            print("Reconnecting to the database...")
+            # Перепідключення
+            result = urlparse(DATABASE_URL)
+            self.conn = psycopg2.connect(
+                dbname=result.path[1:], user=result.username, password=result.password,
+                host=result.hostname, port=result.port, sslmode='require'
+            )
+            cur = self.conn.cursor()
+            cur.execute(query, params)
+
+        self.conn.commit()
+        if fetch == "one":
+            res = cur.fetchone()
+            cur.close()
+            return res
+        if fetch == "all":
+            res = cur.fetchall()
+            cur.close()
+            return res
+        cur.close()
+
 
     def init_db(self):
         self.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT,
-                chat_id BIGINT,
-                first_name TEXT,
-                username TEXT,
-                PRIMARY KEY (user_id, chat_id)
+                user_id BIGINT, chat_id BIGINT, first_name TEXT,
+                username TEXT, PRIMARY KEY (user_id, chat_id)
             )
         """)
         self.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
-                id SERIAL PRIMARY KEY,
-                chat_id BIGINT,
-                creditor_id BIGINT,
-                debtor_id BIGINT,
-                amount REAL,
-                comment TEXT,
-                timestamp TIMESTAMPTZ
+                id SERIAL PRIMARY KEY, chat_id BIGINT, creditor_id BIGINT,
+                debtor_id BIGINT, amount REAL, comment TEXT, timestamp TIMESTAMPTZ
             )
         """)
 
@@ -129,164 +142,103 @@ def group_only(func):
     return wrapped
 
 def escape_markdown(text: str) -> str:
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return "".join(f'\\{char}' if char in escape_chars else char for char in str(text))
+    escape_chars = r'_*[]()~`>#+-=|{}.!'; return "".join(f'\\{char}' if char in escape_chars else char for char in str(text))
 
 def get_user_mention(user_id, chat_id):
-    name = db.get_user_name(user_id, chat_id)
-    return f"[{escape_markdown(name)}](tg://user?id={user_id})"
+    name = db.get_user_name(user_id, chat_id); return f"[{escape_markdown(name)}](tg://user?id={user_id})"
 
 def calculate_balances(chat_id: int):
     balances = defaultdict(float)
     transactions = db.get_all_transactions(chat_id)
     if transactions:
         for _, c_id, d_id, amount, _, _ in transactions:
-            balances[c_id] += float(amount)
-            balances[d_id] -= float(amount)
-    net_debts = defaultdict(float)
-    users = [u[0] for u in db.get_group_members(chat_id)]
+            balances[c_id] += float(amount); balances[d_id] -= float(amount)
+    net_debts = defaultdict(float); users = [u[0] for u in db.get_group_members(chat_id)]
     while True:
         debtors = sorted([u for u in users if balances.get(u, 0) < -0.01], key=lambda u: balances.get(u, 0))
         creditors = sorted([u for u in users if balances.get(u, 0) > 0.01], key=lambda u: balances.get(u, 0), reverse=True)
-        if not debtors or not creditors:
-            break
-        d, c = debtors[0], creditors[0]
-        amount = min(abs(balances.get(d, 0)), balances.get(c, 0))
-        net_debts[(d, c)] += amount
-        balances[d] = balances.get(d, 0) + amount
-        balances[c] = balances.get(c, 0) - amount
+        if not debtors or not creditors: break
+        d, c = debtors[0], creditors[0]; amount = min(abs(balances.get(d, 0)), balances.get(c, 0)); net_debts[(d, c)] += amount; balances[d] = balances.get(d, 0) + amount; balances[c] = balances.get(c, 0) - amount
     return net_debts
 
 async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"{EMOJI['money']} Добавить долг", callback_data="add_debt"), InlineKeyboardButton(f"{EMOJI['repay']} Вернуть долг", callback_data="repay")], [InlineKeyboardButton(f"{EMOJI['split']} Разделить счет", callback_data="split"), InlineKeyboardButton(f"{EMOJI['status']} Баланс", callback_data="status")], [InlineKeyboardButton(f"{EMOJI['my_debts']} Мои долги", callback_data="my_debts"), InlineKeyboardButton(f"{EMOJI['history']} История", callback_data="history_menu")]]
-    text = "Финансовый Помощник к вашим услугам:"
+    text = "Финансовый Помощник к вашим услугам:";
     if update.callback_query:
-        try:
-            await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        try: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         except BadRequest as e:
             if "Message is not modified" not in str(e): raise
         await update.callback_query.answer()
-    else:
-        msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
-        context.chat_data['main_menu_id'] = msg.message_id
-async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await start_menu(update, context)
-    return ConversationHandler.END
+    else: msg = await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard)); context.chat_data['main_menu_id'] = msg.message_id
+async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE): context.user_data.clear(); await start_menu(update, context); return ConversationHandler.END
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        await update.message.delete()
-    context.user_data.clear()
-    await start_menu(update, context)
-    return ConversationHandler.END
-async def process_final_step(update, context, db_action):
-    prompt_msg_id = context.user_data.pop('prompt_msg_id', None)
-    db_action()
+    if update.message: await update.message.delete(); context.user_data.clear(); await start_menu(update, context); return ConversationHandler.END
+async def process_final_step(update: Update, context: ContextTypes.DEFAULT_TYPE, db_action):
+    prompt_msg_id = context.user_data.pop('prompt_msg_id', None);
+    try:
+        db_action()
+    except Exception as e:
+        print(f"Помилка при записі в базу: {e}")
+        # Тут можна додати сповіщення користувачу про помилку
     if prompt_msg_id:
-        try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=prompt_msg_id)
-        except BadRequest:
-            pass
-    await start_menu(update, context)
-    return ConversationHandler.END
+        try: await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=prompt_msg_id)
+        except BadRequest: pass
+    await start_menu(update, context); return ConversationHandler.END
+
+# --- 💵 ДИАЛОГ: ДОБАВИТЬ ДОЛГ ---
 @group_only
 async def add_debt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['prompt_msg_id'] = query.message.message_id
-    members = db.get_group_members(query.message.chat_id)
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members]
-    keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")])
-    await query.message.edit_text("💰 Кто заплатил?", reply_markup=InlineKeyboardMarkup(keyboard))
-    await query.answer()
-    return SELECT_CREDITOR
+    query = update.callback_query; context.user_data['prompt_msg_id'] = query.message.message_id; members = db.get_group_members(query.message.chat_id); keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members]; keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")]); await query.message.edit_text("💰 Кто заплатил?", reply_markup=InlineKeyboardMarkup(keyboard)); await query.answer(); return SELECT_CREDITOR
 async def add_debt_select_creditor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['creditor_id'] = int(query.data.split('_')[1])
-    members = db.get_group_members(query.message.chat_id)
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['creditor_id']]
-    keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")])
-    await query.message.edit_text("За кого заплатили?", reply_markup=InlineKeyboardMarkup(keyboard))
-    await query.answer()
-    return SELECT_DEBTOR
+    query = update.callback_query; context.user_data['creditor_id'] = int(query.data.split('_')[1]); members = db.get_group_members(query.message.chat_id); keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['creditor_id']]; keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")]); await query.message.edit_text("За кого заплатили?", reply_markup=InlineKeyboardMarkup(keyboard)); await query.answer(); return SELECT_DEBTOR
 async def add_debt_select_debtor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['debtor_id'] = int(query.data.split('_')[1])
-    await query.message.edit_text("Какая сумма?\n(Можно отправить /cancel, чтобы вернуться в меню)")
-    await query.answer()
-    return GET_AMOUNT
+    query = update.callback_query; context.user_data['debtor_id'] = int(query.data.split('_')[1]); await query.message.edit_text("Какая сумма?\n(Можно отправить /cancel, чтобы вернуться в меню)"); await query.answer(); return GET_AMOUNT
 async def add_debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        context.user_data['amount'] = float(update.message.text.replace(',', '.'))
-        msg_id = context.user_data.get('prompt_msg_id')
-        await update.message.delete()
-        if msg_id:
-            await context.bot.edit_message_text("За что? (Комментарий или /skip для пропуска)", chat_id=update.effective_chat.id, message_id=msg_id)
+        context.user_data['amount'] = float(update.message.text.replace(',', '.')); msg_id = context.user_data.get('prompt_msg_id'); await update.message.delete();
+        if msg_id: await context.bot.edit_message_text("За что? (Комментарий или /skip для пропуска)", chat_id=update.effective_chat.id, message_id=msg_id)
         return GET_COMMENT
     except (ValueError, TypeError):
-        await update.message.reply_text("⚠️ Введите число.", quote=True)
-        return GET_AMOUNT
+        await update.message.reply_text("⚠️ Введите число.", quote=True); return GET_AMOUNT
 async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip=False):
-    comment = "" if is_skip else update.message.text
-    await update.message.delete()
+    comment = "" if is_skip else update.message.text; await update.message.delete();
     def action(): db.add_transaction(update.effective_chat.id, context.user_data['creditor_id'], context.user_data['debtor_id'], context.user_data['amount'], comment)
     return await process_final_step(update, context, action)
+
+# --- 💸 ДИАЛОГ: ВЕРНУТЬ ДОЛГ ---
 @group_only
 async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['prompt_msg_id'] = query.message.message_id
-    members = db.get_group_members(query.message.chat_id)
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members]
-    keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")])
-    await query.message.edit_text("💸 Кто возвращает долг?", reply_markup=InlineKeyboardMarkup(keyboard))
-    await query.answer()
-    return REPAY_SELECT_DEBTOR
+    query = update.callback_query; context.user_data['prompt_msg_id'] = query.message.message_id; members = db.get_group_members(query.message.chat_id); keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members]; keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")]); await query.message.edit_text("💸 Кто возвращает долг?", reply_markup=InlineKeyboardMarkup(keyboard)); await query.answer(); return REPAY_SELECT_DEBTOR
 async def repay_select_debtor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['debtor_id'] = int(query.data.split('_')[1])
-    members = db.get_group_members(query.message.chat_id)
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['debtor_id']]
-    keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")])
-    await query.message.edit_text("Кому возвращают?", reply_markup=InlineKeyboardMarkup(keyboard))
-    await query.answer()
-    return REPAY_SELECT_CREDITOR
+    query = update.callback_query; context.user_data['debtor_id'] = int(query.data.split('_')[1]); members = db.get_group_members(query.message.chat_id); keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['debtor_id']]; keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")]); await query.message.edit_text("Кому возвращают?", reply_markup=InlineKeyboardMarkup(keyboard)); await query.answer(); return REPAY_SELECT_CREDITOR
 async def repay_select_creditor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['creditor_id'] = int(query.data.split('_')[1])
-    await query.message.edit_text("Какую сумму вернули?\n(Можно отправить /cancel, чтобы вернуться в меню)")
-    await query.answer()
-    return REPAY_GET_AMOUNT
+    query = update.callback_query; context.user_data['creditor_id'] = int(query.data.split('_')[1]); await query.message.edit_text("Какую сумму вернули?\n(Можно отправить /cancel, чтобы вернуться в меню)"); await query.answer(); return REPAY_GET_AMOUNT
 async def repay_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(update.message.text.replace(',', '.'))
         await update.message.delete()
-        def action(): db.add_transaction(update.effective_chat.id, context.user_data['creditor_id'], context.user_data['debtor_id'], amount, "Погашение долга")
+        def action():
+            # --- ОСЬ ГОЛОВНЕ ВИПРАВЛЕННЯ ---
+            # Той, хто повертає (debtor_id), стає "кредитором" у цій транзакції (бо він дає гроші).
+            # Той, кому повертають (creditor_id), стає "боржником" (бо він отримує гроші, його борг зменшується).
+            creditor_in_transaction = context.user_data['debtor_id']
+            debtor_in_transaction = context.user_data['creditor_id']
+            db.add_transaction(update.effective_chat.id, creditor_in_transaction, debtor_in_transaction, amount, "Погашение долга")
         return await process_final_step(update, context, action)
     except (ValueError, TypeError):
         await update.message.reply_text("⚠️ Введите число.", quote=True)
         return REPAY_GET_AMOUNT
+
+# --- 🍕 ДИАЛОГ: РАЗДЕЛИТЬ СЧЕТ ---
 @group_only
 async def split_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['prompt_msg_id'] = query.message.message_id
-    members = db.get_group_members(query.message.chat_id)
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members]
-    keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")])
-    await query.message.edit_text("🍕 Кто заплатил за всех?", reply_markup=InlineKeyboardMarkup(keyboard))
-    await query.answer()
-    return SPLIT_SELECT_PAYER
+    query = update.callback_query; context.user_data['prompt_msg_id'] = query.message.message_id; members = db.get_group_members(query.message.chat_id); keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members]; keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")]); await query.message.edit_text("🍕 Кто заплатил за всех?", reply_markup=InlineKeyboardMarkup(keyboard)); await query.answer(); return SPLIT_SELECT_PAYER
 async def split_select_payer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    context.user_data['payer_id'] = int(query.data.split('_')[1])
-    await query.message.edit_text("Какая общая сумма счета?\n(Можно отправить /cancel, чтобы вернуться в меню)")
-    await query.answer()
-    return SPLIT_GET_AMOUNT
+    query = update.callback_query; context.user_data['payer_id'] = int(query.data.split('_')[1]); await query.message.edit_text("Какая общая сумма счета?\n(Можно отправить /cancel, чтобы вернуться в меню)"); await query.answer(); return SPLIT_GET_AMOUNT
 async def split_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        context.user_data['amount'] = float(update.message.text.replace(',', '.'))
-        msg_id = context.user_data.get('prompt_msg_id')
-        await update.message.delete()
-        if msg_id:
-            await context.bot.edit_message_text("За что? (Комментарий или /skip для пропуска)", chat_id=update.effective_chat.id, message_id=msg_id)
+        context.user_data['amount'] = float(update.message.text.replace(',', '.')); msg_id = context.user_data.get('prompt_msg_id'); await update.message.delete()
+        if msg_id: await context.bot.edit_message_text("За что? (Комментарий или /skip для пропуска)", chat_id=update.effective_chat.id, message_id=msg_id)
         return SPLIT_GET_COMMENT
     except (ValueError, TypeError):
         await update.message.reply_text("⚠️ Введите число.", quote=True)
@@ -302,61 +254,45 @@ async def split_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip
             for debtor_id, _ in members:
                 if debtor_id != payer_id: db.add_transaction(chat_id, payer_id, debtor_id, amount_per_person, comment)
     return await process_final_step(update, context, action)
+
+# --- ✨ ФУНКЦИИ БЕЗ ДИАЛОГОВ ---
 @group_only
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query, chat_id = update.callback_query, update.effective_chat.id
-    net_debts = calculate_balances(chat_id)
-    text = f"*{EMOJI['status']} Текущий баланс:*\n\n"
-    if not net_debts:
-        text += escape_markdown(f"{EMOJI['party']} Все в расчете!")
+    query, chat_id = update.callback_query, update.effective_chat.id; net_debts = calculate_balances(chat_id); text = f"*{EMOJI['status']} Текущий баланс:*\n\n"
+    if not net_debts: text += escape_markdown(f"{EMOJI['party']} Все в расчете!")
     else:
-        for (d_id, c_id), amount in net_debts.items():
-            text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} *{escape_markdown(f'{amount:.2f}')} UAH*\n"
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
-    await query.answer()
+        for (d_id, c_id), amount in net_debts.items(): text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} *{escape_markdown(f'{amount:.2f}')} UAH*\n"
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2); await query.answer()
 @group_only
 async def my_debts_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query, user_id, chat_id = update.callback_query, update.effective_user.id, update.effective_chat.id
-    net_debts, i_owe, owe_me = calculate_balances(chat_id), "", ""
+    query, user_id, chat_id = update.callback_query, update.effective_user.id, update.effective_chat.id; net_debts, i_owe, owe_me = calculate_balances(chat_id), "", ""
     for (d_id, c_id), amount in net_debts.items():
         if d_id == user_id: i_owe += f" • {get_user_mention(c_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
         if c_id == user_id: owe_me += f" • {get_user_mention(d_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
-    i_owe_text = i_owe or escape_markdown('Никому.')
-    owe_me_text = owe_me or escape_markdown('Никто.')
+    i_owe_text = i_owe or escape_markdown('Никому.'); owe_me_text = owe_me or escape_markdown('Никто.')
     text = f"*{EMOJI['my_debts']} Моя сводка:*\n\n*Я должен:*\n{i_owe_text}\n\n*Мне должны:*\n{owe_me_text}"
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
-    await query.answer()
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2); await query.answer()
 @group_only
 async def history_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query, chat_id = update.callback_query, update.effective_chat.id
-    transactions = db.get_all_transactions(chat_id)
-    if not transactions:
-        await query.answer("История пуста.", show_alert=True)
-        return
+    query, chat_id = update.callback_query, update.effective_chat.id; transactions = db.get_all_transactions(chat_id)
+    if not transactions: await query.answer("История пуста.", show_alert=True); return
     months = sorted(list({t[5].strftime("%Y-%m") for t in transactions}), reverse=True)
     keyboard = [[InlineKeyboardButton(f"{RUSSIAN_MONTHS_NOM[datetime.strptime(m, '%Y-%m').month]} {datetime.strptime(m, '%Y-%m').year}", callback_data=f"history_{m}")] for m in months]
-    await query.message.edit_text("Выберите месяц:", reply_markup=InlineKeyboardMarkup(keyboard + [[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]))
-    await query.answer()
+    await query.message.edit_text("Выберите месяц:", reply_markup=InlineKeyboardMarkup(keyboard + [[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]])); await query.answer()
 @group_only
 async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query, chat_id = update.callback_query, update.effective_chat.id
-    year_month = query.data.split('_')[1]
-    year, month = map(int, year_month.split('-'))
+    query, chat_id = update.callback_query, update.effective_chat.id; year_month = query.data.split('_')[1]; year, month = map(int, year_month.split('-'))
     transactions = [tx for tx in db.get_all_transactions(chat_id) if tx[5].year == year and tx[5].month == month]
     text = f"*{EMOJI['history']} История за {escape_markdown(RUSSIAN_MONTHS_NOM[month])} {year}*\n\n"
-    if not transactions:
-        text += escape_markdown("В этом месяце операций не было.")
+    if not transactions: text += escape_markdown("В этом месяце операций не было.")
     else:
         for _, c_id, d_id, amount, comment, ts in transactions:
             date = ts.strftime('%d.%m')
-            if comment == "Погашение долга":
-                text += f"`{escape_markdown(date)}`: {get_user_mention(d_id, chat_id)} погасил\\(а\\) долг перед {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH*\n"
+            if comment == "Погашение долга": text += f"`{escape_markdown(date)}`: {get_user_mention(c_id, chat_id)} погасил\\(а\\) долг перед {get_user_mention(d_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH*\n"
             else:
-                action_text = "занял\\(а\\) у"
-                final_comment = f" \\({escape_markdown(comment)}\\)" if comment else ""
+                action_text = "занял\\(а\\) у"; final_comment = f" \\({escape_markdown(comment)}\\)" if comment else ""
                 text += f"`{escape_markdown(date)}`: {get_user_mention(d_id, chat_id)} {action_text} {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH*{final_comment}\n"
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
-    await query.answer()
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2); await query.answer()
 
 app = Flask('')
 @app.route('/')
@@ -386,11 +322,9 @@ def main():
     application.add_handler(CallbackQueryHandler(history_menu_handler, pattern="^history_menu$"))
     application.add_handler(CallbackQueryHandler(history_show_handler, pattern=r"^history_"))
 
-    print("Бот успешно запущен и работает...")
-    application.run_polling()
+    print("Бот успешно запущен и работает..."); application.run_polling()
 
 def ping_database():
-    """Функція, яка не дає базі даних заснути."""
     while True:
         try:
             print("[DB Ping] Sending keep-alive query...")
