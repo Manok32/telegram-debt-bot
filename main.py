@@ -72,8 +72,8 @@ class Database:
                     return cur.fetchone()
                 if fetch == "all":
                     return cur.fetchall()
-        except (psycopg2.InterfaceError, psycopg2.OperationalError):
-            print("Database connection lost. Reconnecting...")
+        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            print(f"Database connection lost ({e}). Reconnecting...")
             result = urlparse(DATABASE_URL)
             self.conn = psycopg2.connect(dbname=result.path[1:], user=result.username, password=result.password, host=result.hostname, port=result.port, sslmode='require')
             # Повторюємо запит після перепідключення
@@ -190,11 +190,11 @@ async def add_debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
     except (ValueError, TypeError):
         await update.message.reply_text("⚠️ Введите число.", quote=True); return GET_AMOUNT
 async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip=False):
-    comment = "" if is_skip else update.message.text; await update.message.delete()
+    comment = "" if is_skip else update.message.text; await update.message.delete();
     def action(): db.add_transaction(update.effective_chat.id, context.user_data['creditor_id'], context.user_data['debtor_id'], context.user_data['amount'], comment)
     return await process_final_step(update, context, action)
 
-# --- 💸 ДИАЛОГ: ВЕРНУТЬ ДОЛГ ---
+# --- 💸 ДИАЛОГ: ВЕРНУТЬ ДОЛГ (ИСПРАВЛЕН) ---
 @group_only
 async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; context.user_data['prompt_msg_id'] = query.message.message_id; members = db.get_group_members(query.message.chat_id); keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members]; keyboard.append([InlineKeyboardButton(f"{EMOJI['back']} Вернуться в меню", callback_data="cancel")]); await query.message.edit_text("💸 Кто возвращает долг?", reply_markup=InlineKeyboardMarkup(keyboard)); await query.answer(); return REPAY_SELECT_DEBTOR
@@ -207,12 +207,12 @@ async def repay_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(update.message.text.replace(',', '.'))
         await update.message.delete()
         def action():
-            # --- ОСЬ ГОЛОВНЕ ВИПРАВЛЕННЯ ---
-            # Той, хто повертає борг (debtor_id), стає "кредитором" у цій транзакції, бо він дає гроші.
-            # Той, кому повертають (creditor_id), стає "боржником", бо він отримує гроші, і його борг перед ним зменшується.
-            creditor_in_transaction = context.user_data['debtor_id']
-            debtor_in_transaction = context.user_data['creditor_id']
-            db.add_transaction(update.effective_chat.id, creditor_in_transaction, debtor_in_transaction, amount, "Погашение долга")
+            # --- ОСНОВНОЕ ЛОГИЧЕСКОЕ ИСПРАВЛЕНИЕ ---
+            # Тот, кто возвращает (debtor_id), становится "кредитором" в этой транзакции, так как он ОТДАЕТ деньги.
+            # Тот, кому возвращают (creditor_id), становится "должником", так как он ПОЛУЧАЕТ деньги (его баланс уменьшается).
+            creditor_for_this_transaction = context.user_data['debtor_id']
+            debtor_for_this_transaction = context.user_data['creditor_id']
+            db.add_transaction(update.effective_chat.id, creditor_for_this_transaction, debtor_for_this_transaction, amount, "Погашение долга")
         return await process_final_step(update, context, action)
     except (ValueError, TypeError):
         await update.message.reply_text("⚠️ Введите число.", quote=True)
@@ -277,12 +277,12 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         for _, c_id, d_id, amount, comment, ts in transactions:
             date = ts.strftime('%d.%m')
-            # --- ВИПРАВЛЕННЯ ЛОГІКИ ВІДОБРАЖЕННЯ ---
+            # --- ИСПРАВЛЕНА ЛОГИКА ОТОБРАЖЕНИЯ ---
             if comment == "Погашение долга":
-                # c_id - хто повернув, d_id - кому повернули
+                # c_id - это тот, кто вернул; d_id - тот, кому вернули
                 text += f"`{escape_markdown(date)}`: {get_user_mention(c_id, chat_id)} погасил\\(а\\) долг перед {get_user_mention(d_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH*\n"
             else:
-                # c_id - хто заплатив, d_id - за кого заплатили
+                # c_id - это кредитор; d_id - это должник
                 action_text = "занял\\(а\\) у"; final_comment = f" \\({escape_markdown(comment)}\\)" if comment else ""
                 text += f"`{escape_markdown(date)}`: {get_user_mention(d_id, chat_id)} {action_text} {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH*{final_comment}\n"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2); await query.answer()
@@ -340,3 +340,4 @@ if __name__ == "__main__":
 
     print("Запуск телеграм-бота...")
     main()
+
