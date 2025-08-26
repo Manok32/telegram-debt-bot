@@ -3,7 +3,7 @@ import os
 import time
 from threading import Thread
 import asyncio
-from datetime import datetime, timezone # ✅ Убедимся, что datetime и timezone импортированы здесь
+from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
 import json
@@ -27,8 +27,8 @@ from telegram.error import BadRequest
 # --- ⚙️ НАСТРОЙКИ ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '1062630993')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL') 
+MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '0')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 TELEGRAM_WEBHOOK_PATH = os.environ.get('TELEGRAM_WEBHOOK_PATH', 'telegram')
 
 # --- 🪵 ЛОГИРОВАНИЕ ---
@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 try:
     MY_ADMIN_ID = int(MY_ADMIN_ID)
 except ValueError:
-    # logger уже инициализирован, так что это безопасно
     logger.error("MY_ADMIN_ID в переменных окружения не является числом. Команда /clear_all_debts не будет работать.")
     MY_ADMIN_ID = 0
 
@@ -128,18 +127,16 @@ class Database:
     def get_group_members(self, chat_id: int):
         return self.execute("SELECT user_id, first_name FROM users WHERE chat_id = %s", (chat_id,), fetch="all")
 
-    # ✅ ИСПРАВЛЕНИЕ: Добавляем более надежную обработку ошибок в get_user_name
     def get_user_name(self, user_id, chat_id):
         try:
             res = self.execute("SELECT first_name FROM users WHERE user_id=%s AND chat_id=%s", (user_id, chat_id), fetch="one")
             if res and len(res) > 0:
                 return res[0]
-            # Если пользователь не найден в базе для данного чата
             logger.warning(f"User {user_id} not found in 'users' table for chat {chat_id}. Returning '???'.")
             return "???"
         except Exception as e:
             logger.error(f"Failed to retrieve user name for user_id={user_id}, chat_id={chat_id}: {e}")
-            return "???" # Возвращаем заглушку в случае любой ошибки
+            return "???"
 
     def add_transaction(self, chat_id, c_id, d_id, amount, comment):
         query = "INSERT INTO transactions (chat_id, creditor_id, debtor_id, amount, comment, timestamp) VALUES (%s, %s, %s, %s, %s, %s)"
@@ -433,7 +430,7 @@ async def my_debts_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @group_only
 async def history_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, chat_id = update.callback_query, update.effective_chat.id
-    transactions_raw = db.get_all_transactions(chat_id) # Получаем все транзакции
+    transactions_raw = db.get_all_transactions(chat_id)
     
     if not transactions_raw:
         await query.answer("История пуста.", show_alert=True)
@@ -441,7 +438,6 @@ async def history_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     months = set()
     for t in transactions_raw:
-        # Проверяем и преобразуем timestamp, если он не datetime
         ts_obj = t[5]
         if not isinstance(ts_obj, datetime):
             logger.warning(f"Timestamp {ts_obj} (type {type(ts_obj)}) for transaction ID {t[0]} is not datetime. Attempting to convert for history menu.")
@@ -482,9 +478,7 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.error(f"Failed to convert timestamp {raw_ts} to datetime for transaction ID {tx_id}. Skipping this transaction.")
                 continue
 
-        # Фильтруем по году и месяцу после обеспечения, что timestamp - это datetime объект
         if current_ts_obj.year == year and current_ts_obj.month == month:
-            # Добавляем в обработанные транзакции, заменяя исходный timestamp на datetime объект
             processed_transactions.append((tx_id, c_id, d_id, amount, comment, current_ts_obj))
     
     text_header = f"*{EMOJI['history']} История за {escape_markdown(RUSSIAN_MONTHS_NOM[month])} {year}*\n\n"
@@ -493,7 +487,6 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not processed_transactions:
         text_body += escape_markdown("В этом месяце операций не было.") + "\n"
     else:
-        # ✅ ИСПРАВЛЕНИЕ: Теперь tx_obj[5] гарантированно является datetime объектом
         for _, c_id, d_id, amount, comment, ts_obj in processed_transactions:
             date_str = escape_markdown(ts_obj.strftime('%d.%m'))
             amount_str = escape_markdown(f'{amount:.2f}')
@@ -568,12 +561,14 @@ def home():
 
 @app.post(f"/{TELEGRAM_WEBHOOK_PATH}")
 async def telegram_webhook_handler():
+    # ✅ Убедитесь, что Application был инициализирован, иначе не сможем обрабатывать
     if application is None:
         logger.error("Telegram Application не инициализирован для вебхуков.")
         return "Error: Bot not ready", 500
     try:
         update = Update.de_json(request.get_json(force=True), application.bot)
-        await application.process_update(update)
+        # ✅ Вызываем post_update, который планирует обработку обновления в асинхронном цикле Application
+        await application.post_update(update) 
         return "ok"
     except Exception as e:
         logger.error(f"Ошибка при обработке вебхук-обновления: {e}", exc_info=True)
@@ -678,12 +673,20 @@ async def init_bot():
     logger.info(f"Установка нового вебхука: {full_webhook_url}")
     await application.bot.set_webhook(url=full_webhook_url)
 
-    logger.info("Запуск Telegram Application в фоновом режиме (для обработки очереди вебхуков)...")
-    await application.run_task()
+    # ✅ ИСПРАВЛЕНИЕ: Вызываем post_init() для подготовки Application
+    # и убираем await application.run_task()
+    await application.post_init()
     logger.info("Telegram бот успешно настроен. Flask приложение будет обслуживаться Gunicorn.")
 
 
 if __name__ == "__main__":
+    # ✅ Убедимся, что Flask приложение не запускается внутри main,
+    # так как его запускает Gunicorn
+    # logger.info("Запуск потока веб-сервера для поддержания активности Render...")
+    # flask_thread = Thread(target=run_flask)
+    # flask_thread.daemon = True
+    # flask_thread.start() # Убран запуск Flask здесь
+
     asyncio.run(init_bot())
 
     logger.info("Запуск потока пинга базы данных для поддержания активности...")
@@ -691,3 +694,5 @@ if __name__ == "__main__":
     db_ping_thread.daemon = True
     db_ping_thread.start()
 
+    # Flask/Gunicorn будет запускать приложение и этот код выше будет выполнен
+    # как часть инициализации.
