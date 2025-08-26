@@ -26,7 +26,7 @@ from telegram.error import BadRequest
 # --- ⚙️ НАСТРОЙКИ ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '0')
+MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '1062630993')
 try:
     MY_ADMIN_ID = int(MY_ADMIN_ID)
 except ValueError:
@@ -660,3 +660,4 @@ if __name__ == "__main__":
     db_ping_thread.start()
 
     main()
+
