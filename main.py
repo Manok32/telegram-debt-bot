@@ -36,7 +36,6 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 (SELECT_CREDITOR, SELECT_DEBTOR, GET_AMOUNT, GET_COMMENT) = range(4)
 (REPAY_SELECT_DEBTOR, REPAY_SELECT_CREDITOR, REPAY_GET_AMOUNT) = range(4, 7)
 (SPLIT_SELECT_PAYER, SPLIT_GET_AMOUNT, SPLIT_GET_COMMENT) = range(7, 10)
-CONFIRM_CLEAR = 10
 
 # --- 🗃️ КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ---
 class Database:
@@ -60,7 +59,6 @@ class Database:
         return res[0] if res else "???"
     def add_transaction(self, chat_id, c_id, d_id, amount, comment): self.execute("INSERT INTO transactions (chat_id, creditor_id, debtor_id, amount, comment, timestamp) VALUES (?, ?, ?, ?, ?, ?)",(chat_id, c_id, d_id, amount, comment, datetime.now().isoformat()))
     def get_all_transactions(self, chat_id): return self.execute("SELECT id, creditor_id, debtor_id, amount, comment, timestamp FROM transactions WHERE chat_id=? ORDER BY timestamp ASC", (chat_id,), fetch="all")
-    def clear_transactions_for_chat(self, chat_id: int): self.execute("DELETE FROM transactions WHERE chat_id = ?", (chat_id,))
 
 db = Database(DB_NAME)
 
@@ -126,6 +124,10 @@ async def send_new_menu_from_context(chat_id, context):
         [InlineKeyboardButton(f"{EMOJI['split']} Разделить счет", callback_data="split"), InlineKeyboardButton(f"{EMOJI['status']} Баланс", callback_data="status")],
         [InlineKeyboardButton(f"{EMOJI['my_debts']} Мои долги", callback_data="my_debts"), InlineKeyboardButton(f"{EMOJI['history']} История", callback_data="history_menu")]
     ]))
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.delete()
+    return ConversationHandler.END
 
 # --- 💵 ДИАЛОГ: ДОБАВИТЬ ДОЛГ ---
 @group_only
@@ -253,6 +255,7 @@ async def split_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip
     await send_new_menu_from_context(update.effective_chat.id, context)
     return ConversationHandler.END
 
+
 # --- ✨ ФУНКЦИИ БЕЗ ДИАЛОГОВ ---
 @group_only
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -304,15 +307,17 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 text += f"`{date}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH* ({escape_markdown(comment)})\n"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
 
+
 # --- 🚀 ЗАПУСК БОТА ---
 def main():
     if not TELEGRAM_BOT_TOKEN:
-        print("Ошибка: не найден TELEGRAM_BOT_TOKEN. Убедитесь, что он задан в переменных окружения.")
+        logging.error("Ошибка: не найден TELEGRAM_BOT_TOKEN. Убедитесь, что он задан в переменных окружения.")
         return
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    fallbacks = [CallbackQueryHandler(end_conversation, pattern="^cancel$"), CommandHandler('cancel', cancel_command_handler)]
+    # ✅ ИСПРАВЛЕНИЕ: Используем правильное имя функции 'cancel_command'
+    fallbacks = [CallbackQueryHandler(end_conversation, pattern="^cancel$"), CommandHandler('cancel', cancel_command)]
 
     add_debt_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_debt_start, pattern="^add_debt$")],
