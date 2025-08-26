@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
 import time
-import asyncio # ✅ ДОБАВЛЕН ЭТОТ ИМПОРТ
+import asyncio
 from threading import Thread
 import psycopg2
 from urllib.parse import urlparse
@@ -552,16 +552,32 @@ def ping_database():
                 logger.error(f"[DB Ping] Failed to reconnect to DB: {reconnect_e}")
         time.sleep(600)
 
-# ✅ НОВАЯ ФУНКЦИЯ для запуска polling в отдельном потоке с собственным asyncio event loop
+# ✅ ОБНОВЛЕННАЯ ФУНКЦИЯ для запуска polling в отдельном потоке
 def start_bot_polling(application: Application):
     """
     Запускает polling PTB Application в отдельном потоке,
-    инициализируя новый event loop asyncio для этого потока.
+    инициализируя новый event loop asyncio для этого потока и
+    явно управляя его жизненным циклом.
     """
     logger.info("Запуск телеграм-бота...")
+    # Создать новый цикл событий asyncio для этого потока
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    application.run_polling()
+
+    try:
+        # Инициализировать приложение и запустить его асинхронно
+        loop.run_until_complete(application.initialize())
+        loop.create_task(application.start()) # Запустить polling как задачу в этом цикле
+        logger.info("Приложение запущено") # Лог из PTB больше не будет выводиться
+        loop.run_forever() # Запустить цикл событий до его остановки
+    except Exception as e:
+        logger.critical(f"Ошибка в потоке бота: {e}", exc_info=True)
+    finally:
+        # Убедиться, что приложение остановлено и цикл закрыт
+        if application.running:
+            loop.run_until_complete(application.stop())
+        loop.close()
+        logger.info("Поток телеграм-бота остановлен.")
 
 
 # --- 🚀 ЗАПУСК БОТА ---
@@ -638,7 +654,7 @@ def main_logic():
 
     application.add_error_handler(error_handler)
 
-    # Запускаем поток пинга базы данных перед запуском Flask
+    # Запускаем поток пинга базы данных
     logger.info("Запуск потока пинга базы данных для поддержания активности...")
     db_ping_thread = Thread(target=ping_database)
     db_ping_thread.daemon = True
