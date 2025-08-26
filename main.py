@@ -1,11 +1,15 @@
 import logging
-import sqlite3
+import sqlite3 # Оставлено для совместимости, но не используется напрямую с Postgres
 import os
 from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
 import time
-from threading import Thread # ✅ ДОБАВЛЕН ЭТОТ ИМПОРТ
+from threading import Thread
+
+# ✅ ИСПРАВЛЕНИЕ: Импортируем psycopg2 и urlparse здесь
+import psycopg2
+from urllib.parse import urlparse
 
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, constants
@@ -484,6 +488,7 @@ async def clear_transactions_confirm(update: Update, context: ContextTypes.DEFAU
         await query.message.edit_text("Очистка отменена.")
     return ConversationHandler.END
 
+
 # --- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Exception while handling an update:", exc_info=context.error)
@@ -529,7 +534,7 @@ def main():
     global db # Объявляем db как глобальную переменную для инициализации
     
     if not TELEGRAM_BOT_TOKEN:
-        logger.critical("!!! ОШИБКА: Токен не найден. Добавьте TELEGRAM_BOT_TOKEN в Environment Variables.")
+        logger.critical("!!! ОШИБКА: Токен не найден. Убедитесь, что он задан в переменных окружения.")
         return
     if not DATABASE_URL:
         logger.critical("!!! ОШИБКА: URL базы данных не найден. Добавьте DATABASE_URL в Environment Variables.")
@@ -582,7 +587,7 @@ def main():
 
     # --- Регистрация обработчиков ---
     application.add_handler(CommandHandler(["start", "menu"], start_menu_command))
-    application.add_handler(CallbackQueryHandler(back_to_menu_handler, pattern="^back_to_menu$")) # Используем back_to_menu_handler
+    application.add_handler(CallbackQueryHandler(back_to_menu_handler, pattern="^back_to_menu$"))
     
     application.add_handler(add_debt_handler)
     application.add_handler(repay_handler)
@@ -612,4 +617,3 @@ if __name__ == "__main__":
     db_ping_thread.start()
 
     main()
-
