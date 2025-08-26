@@ -113,7 +113,10 @@ async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
-        await update.callback_query.message.delete()
+        try:
+            await update.callback_query.message.delete()
+        except BadRequest:
+            pass # Сообщение уже было удалено
     context.user_data.clear()
     await send_new_menu_from_context(update.effective_chat.id, context)
     return ConversationHandler.END
@@ -126,14 +129,20 @@ async def send_new_menu_from_context(chat_id, context):
     ]))
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.delete()
+    try:
+        await update.message.delete()
+    except BadRequest:
+        pass
     return ConversationHandler.END
 
 # --- 💵 ДИАЛОГ: ДОБАВИТЬ ДОЛГ ---
 @group_only
 async def add_debt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    await query.message.delete()
+    try:
+        await query.message.delete()
+    except BadRequest:
+        pass
     members = db.get_group_members(query.message.chat_id)
     keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members] + [[InlineKeyboardButton(f"{EMOJI['cancel']} Отмена", callback_data="cancel")]]
     msg = await query.message.reply_text("💰 Кто заплатил?", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -174,7 +183,8 @@ async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_s
     await send_new_menu_from_context(update.effective_chat.id, context)
     return ConversationHandler.END
 
-# --- 💸 ДИАЛОГ: ВЕРНУТЬ ДОЛГ ---
+# --- (Остальные диалоги: repay, split - без изменений) ---
+# ...
 @group_only
 async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
@@ -212,7 +222,6 @@ async def repay_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Введите положительное число.", quote=True)
         return REPAY_GET_AMOUNT
 
-# --- 🍕 ДИАЛОГ: РАЗДЕЛИТЬ СЧЕТ ---
 @group_only
 async def split_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
@@ -262,7 +271,8 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, chat_id = update.callback_query, update.effective_chat.id
     net_debts = calculate_balances(chat_id)
     text = f"*{EMOJI['status']} Текущий баланс:*\n\n"
-    if not net_debts: text += f"{EMOJI['party']} Все в расчете!"
+    # ✅ ИСПРАВЛЕНИЕ: Экранируем восклицательный знак
+    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!"
     else:
         for (d_id, c_id), amount in net_debts.items():
             text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} *{escape_markdown(f'{amount:.2f}')} UAH*\n"
@@ -316,7 +326,6 @@ def main():
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # ✅ ИСПРАВЛЕНИЕ: Используем правильное имя функции 'cancel_command'
     fallbacks = [CallbackQueryHandler(end_conversation, pattern="^cancel$"), CommandHandler('cancel', cancel_command)]
 
     add_debt_handler = ConversationHandler(
