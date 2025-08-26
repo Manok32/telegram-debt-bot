@@ -116,7 +116,7 @@ async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.callback_query.message.delete()
         except BadRequest:
-            pass # Сообщение уже было удалено
+            pass
     context.user_data.clear()
     await send_new_menu_from_context(update.effective_chat.id, context)
     return ConversationHandler.END
@@ -139,10 +139,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @group_only
 async def add_debt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    try:
-        await query.message.delete()
-    except BadRequest:
-        pass
+    await query.message.delete()
     members = db.get_group_members(query.message.chat_id)
     keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members] + [[InlineKeyboardButton(f"{EMOJI['cancel']} Отмена", callback_data="cancel")]]
     msg = await query.message.reply_text("💰 Кто заплатил?", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -183,8 +180,7 @@ async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_s
     await send_new_menu_from_context(update.effective_chat.id, context)
     return ConversationHandler.END
 
-# --- (Остальные диалоги: repay, split - без изменений) ---
-# ...
+# --- 💸 ДИАЛОГ: ВЕРНУТЬ ДОЛГ ---
 @group_only
 async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
@@ -222,6 +218,7 @@ async def repay_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Введите положительное число.", quote=True)
         return REPAY_GET_AMOUNT
 
+# --- 🍕 ДИАЛОГ: РАЗДЕЛИТЬ СЧЕТ ---
 @group_only
 async def split_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
@@ -271,8 +268,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, chat_id = update.callback_query, update.effective_chat.id
     net_debts = calculate_balances(chat_id)
     text = f"*{EMOJI['status']} Текущий баланс:*\n\n"
-    # ✅ ИСПРАВЛЕНИЕ: Экранируем восклицательный знак
-    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!"
+    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!" # Экранируем '!'
     else:
         for (d_id, c_id), amount in net_debts.items():
             text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} *{escape_markdown(f'{amount:.2f}')} UAH*\n"
@@ -285,7 +281,8 @@ async def my_debts_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for (d_id, c_id), amount in net_debts.items():
         if d_id == user_id: i_owe += f" • {get_user_mention(c_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
         if c_id == user_id: owe_me += f" • {get_user_mention(d_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
-    text = f"*{EMOJI['my_debts']} Моя сводка:*\n\n*Я должен:*\n{i_owe or 'Никому.'}\n\n*Мне должны:*\n{owe_me or 'Никто.'}"
+    # ✅ ИСПРАВЛЕНИЕ: Экранируем точки
+    text = f"*{EMOJI['my_debts']} Моя сводка:*\n\n*Я должен:*\n{i_owe or 'Никому\\.'}\n\n*Мне должны:*\n{owe_me or 'Никто\\.'}"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
 
 @group_only
@@ -316,7 +313,6 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 text += f"`{date}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH* ({escape_markdown(comment)})\n"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
-
 
 # --- 🚀 ЗАПУСК БОТА ---
 def main():
