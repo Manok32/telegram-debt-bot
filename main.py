@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
 import time
+import asyncio # ✅ ДОБАВЛЕН ЭТОТ ИМПОРТ
 from threading import Thread
 import psycopg2
 from urllib.parse import urlparse
@@ -551,6 +552,18 @@ def ping_database():
                 logger.error(f"[DB Ping] Failed to reconnect to DB: {reconnect_e}")
         time.sleep(600)
 
+# ✅ НОВАЯ ФУНКЦИЯ для запуска polling в отдельном потоке с собственным asyncio event loop
+def start_bot_polling(application: Application):
+    """
+    Запускает polling PTB Application в отдельном потоке,
+    инициализируя новый event loop asyncio для этого потока.
+    """
+    logger.info("Запуск телеграм-бота...")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    application.run_polling()
+
+
 # --- 🚀 ЗАПУСК БОТА ---
 def main_logic():
     global db
@@ -631,9 +644,10 @@ def main_logic():
     db_ping_thread.daemon = True
     db_ping_thread.start()
 
-    # Запускаем бота в отдельном потоке, чтобы основной поток мог обслуживать Flask
-    logger.info("Запуск телеграм-бота...")
-    application.run_in_thread() # ИСПРАВЛЕНО
+    # Запускаем бота в отдельном потоке с собственным event loop
+    bot_thread = Thread(target=start_bot_polling, args=(application,))
+    bot_thread.daemon = True
+    bot_thread.start()
 
     logger.info("Запуск веб-сервера Flask для поддержания активности Render...")
     run_flask() # Это заблокирует основной поток и будет отвечать на запросы Render
