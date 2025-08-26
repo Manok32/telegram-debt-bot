@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
 import time
+from threading import Thread # ✅ ДОБАВЛЕН ЭТОТ ИМПОРТ
 
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, constants
@@ -611,3 +612,4 @@ if __name__ == "__main__":
     db_ping_thread.start()
 
     main()
+
