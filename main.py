@@ -76,6 +76,7 @@ def group_only(func):
     return wrapped
 
 def escape_markdown(text: str) -> str:
+    # Telegram markdown v2 requires escaping specific characters
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return "".join(f'\\{char}' if char in escape_chars else char for char in str(text))
 
@@ -139,7 +140,10 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @group_only
 async def add_debt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    await query.message.delete()
+    try:
+        await query.message.delete()
+    except BadRequest:
+        pass
     members = db.get_group_members(query.message.chat_id)
     keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members] + [[InlineKeyboardButton(f"{EMOJI['cancel']} Отмена", callback_data="cancel")]]
     msg = await query.message.reply_text("💰 Кто заплатил?", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -281,7 +285,7 @@ async def my_debts_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for (d_id, c_id), amount in net_debts.items():
         if d_id == user_id: i_owe += f" • {get_user_mention(c_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
         if c_id == user_id: owe_me += f" • {get_user_mention(d_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
-    # ✅ ИСПРАВЛЕНИЕ: Экранируем точки
+    # Экранируем точки
     text = f"*{EMOJI['my_debts']} Моя сводка:*\n\n*Я должен:*\n{i_owe or 'Никому\\.'}\n\n*Мне должны:*\n{owe_me or 'Никто\\.'}"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
 
@@ -313,6 +317,7 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 text += f"`{date}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH* ({escape_markdown(comment)})\n"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
+
 
 # --- 🚀 ЗАПУСК БОТА ---
 def main():
