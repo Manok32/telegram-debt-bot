@@ -18,7 +18,7 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 # --- ⚙️ НАСТРОЙКИ ---
-TELEGRAM_BOT_TOKEN = "8368912432:AAHGkSWR_iid6TvYgTyUiZKIAPSf8-Q5YAs"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DB_NAME = "debt_book.db"
 
 # --- 🎨 ЭМОДЗИ И СТРОКИ ---
@@ -396,3 +396,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
