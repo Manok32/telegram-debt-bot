@@ -77,7 +77,9 @@ def group_only(func):
 
 def escape_markdown(text: str) -> str:
     # Telegram markdown v2 requires escaping specific characters
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    # Note: dot '.' is reserved. If it's part of a regular sentence, it needs escaping.
+    # Exclamation mark '!' is reserved.
+    escape_chars = r'_*[]()~`>#+-=|{}.!' # . and ! are included
     return "".join(f'\\{char}' if char in escape_chars else char for char in str(text))
 
 def get_user_mention(user_id, chat_id):
@@ -272,7 +274,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, chat_id = update.callback_query, update.effective_chat.id
     net_debts = calculate_balances(chat_id)
     text = f"*{EMOJI['status']} Текущий баланс:*\n\n"
-    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!" # Экранируем '!'
+    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!"
     else:
         for (d_id, c_id), amount in net_debts.items():
             text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} *{escape_markdown(f'{amount:.2f}')} UAH*\n"
@@ -285,8 +287,8 @@ async def my_debts_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for (d_id, c_id), amount in net_debts.items():
         if d_id == user_id: i_owe += f" • {get_user_mention(c_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
         if c_id == user_id: owe_me += f" • {get_user_mention(d_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
-    # Экранируем точки
-    text = f"*{EMOJI['my_debts']} Моя сводка:*\n\n*Я должен:*\n{i_owe or 'Никому\\.'}\n\n*Мне должны:*\n{owe_me or 'Никто\\.'}"
+    # ✅ ИСПРАВЛЕНИЕ: Экранируем точки с помощью escape_markdown
+    text = f"*{EMOJI['my_debts']} Моя сводка:*\n\n*Я должен:*\n{i_owe or escape_markdown('Никому.')}\n\n*Мне должны:*\n{owe_me or escape_markdown('Никто.')}"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
 
 @group_only
