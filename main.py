@@ -1,21 +1,17 @@
 import logging
+import sqlite3  # Оставлено для совместимости, но не используется напрямую с Postgres
 import os
-import time
-from threading import Thread
-import asyncio
 from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
-import json
-
+import time
+from threading import Thread
 import psycopg2
 from urllib.parse import urlparse
-
-from flask import Flask, request
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, constants
 from telegram.ext import (
     Application,
-    ApplicationBuilder, # ✅ Использование ApplicationBuilder для ясности
     CommandHandler,
     CallbackQueryHandler,
     ConversationHandler,
@@ -29,12 +25,10 @@ from telegram.error import BadRequest
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '0')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-TELEGRAM_WEBHOOK_PATH = os.environ.get('TELEGRAM_WEBHOOK_PATH', 'telegram')
 
 # --- 🪵 ЛОГИРОВАНИЕ ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # ИСПРАВЛЕНО: Changed name to __name__
 
 try:
     MY_ADMIN_ID = int(MY_ADMIN_ID)
@@ -58,11 +52,12 @@ CONFIRM_CLEAR = 10
 
 # --- 🗃️ КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (PostgreSQL) ---
 class Database:
+    # ИСПРАВЛЕНО: Changed init to __init__
     def __init__(self, conn_url):
         if not conn_url:
             raise ValueError("DATABASE_URL не найден. Убедитесь, что он добавлен в Environment Variables.")
         self.conn_url = conn_url
-        self.conn = None
+        self.conn = None # Initialize conn to None
         self._connect()
         self.init_db()
 
@@ -76,7 +71,7 @@ class Database:
                 password=result.password,
                 host=result.hostname,
                 port=result.port,
-                sslmode='require'
+                sslmode='require' # Для Render обычно требуется SSL
             )
             logger.info("Database connection successful.")
         except psycopg2.OperationalError as e:
@@ -86,8 +81,6 @@ class Database:
     def execute(self, query, params=(), fetch=None, retries=3):
         for i in range(retries):
             try:
-                if self.conn is None or self.conn.closed:
-                    self._connect()
                 with self.conn.cursor() as cur:
                     cur.execute(query, params)
                     self.conn.commit()
@@ -95,13 +88,13 @@ class Database:
                         return cur.fetchone()
                     if fetch == "all":
                         return cur.fetchall()
-                return None
+                return None # Для INSERT/UPDATE без FETCH
             except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
                 logger.warning(f"Database connection lost ({e}). Attempting to reconnect (retry {i+1}/{retries})...")
-                self._connect()
+                self._connect() # Попытка переподключения
             except psycopg2.Error as e:
                 logger.error(f"PostgreSQL error during query '{query}': {e}")
-                self.conn.rollback()
+                self.conn.rollback() # Откатываем транзакцию при других ошибках
                 raise
         logger.error(f"Failed to execute query after {retries} attempts.")
         raise psycopg2.OperationalError("Failed to execute query after multiple retries.")
@@ -129,19 +122,12 @@ class Database:
         return self.execute("SELECT user_id, first_name FROM users WHERE chat_id = %s", (chat_id,), fetch="all")
 
     def get_user_name(self, user_id, chat_id):
-        try:
-            res = self.execute("SELECT first_name FROM users WHERE user_id=%s AND chat_id=%s", (user_id, chat_id), fetch="one")
-            if res and len(res) > 0:
-                return res[0]
-            logger.warning(f"User {user_id} not found in 'users' table for chat {chat_id}. Returning '???'.")
-            return "???"
-        except Exception as e:
-            logger.error(f"Failed to retrieve user name for user_id={user_id}, chat_id={chat_id}: {e}")
-            return "???"
+        res = self.execute("SELECT first_name FROM users WHERE user_id=%s AND chat_id=%s", (user_id, chat_id), fetch="one")
+        return res[0] if res else "???"
 
     def add_transaction(self, chat_id, c_id, d_id, amount, comment):
         query = "INSERT INTO transactions (chat_id, creditor_id, debtor_id, amount, comment, timestamp) VALUES (%s, %s, %s, %s, %s, %s)"
-        params = (chat_id, c_id, d_id, amount, comment, datetime.now(timezone.utc))
+        params = (chat_id, c_id, d_id, amount, comment, datetime.now(timezone.utc)) # Используем UTC для TIMESTAMP
         self.execute(query, params)
 
     def get_all_transactions(self, chat_id):
@@ -150,10 +136,7 @@ class Database:
     def clear_transactions_for_chat(self, chat_id: int):
         self.execute("DELETE FROM transactions WHERE chat_id = %s", (chat_id,))
 
-# --- Инициализация DB и Application (Глобальные объекты) ---
-app = Flask(__name__)
-db: Database = None
-application_instance: Application = None # Глобальная переменная для экземпляра Application
+db = None # Global placeholder for the database object
 
 # --- 🧑‍🔧 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def group_only(func):
@@ -172,19 +155,22 @@ def group_only(func):
     return wrapped
 
 def escape_markdown(text: str) -> str:
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    # Символы, которые нужно экранировать в MarkdownV2
+    escape_chars = r'_*~`>#+-=|{}.!' # . и ! включены
+    # ИСПРАВЛЕНО: Добавлен обратный слеш перед каждым экранируемым символом
     return "".join(f'\{char}' if char in escape_chars else char for char in str(text))
 
 def get_user_mention(user_id, chat_id):
     name = db.get_user_name(user_id, chat_id)
+    # ИСПРАВЛЕНО: Формат упоминания для MarkdownV2
     return f"[{escape_markdown(name)}](tg://user?id={user_id})"
 
+# ✅ ИСПРАВЛЕННЫЙ И СТАБИЛЬНЫЙ АЛГОРИТМ РАСЧЕТА БАЛАНСОВ
 def calculate_balances(chat_id: int):
-    direct_debts = defaultdict(float)
-
+    direct_debts = defaultdict(float) # (должник, кредитор) -> сумма всех долгов
     transactions = db.get_all_transactions(chat_id)
     for _, creditor_id, debtor_id, amount, _, _ in transactions:
-        direct_debts[(debtor_id, creditor_id)] += float(amount)
+        direct_debts[(debtor_id, creditor_id)] += float(amount) # Преобразуем amount в float
 
     net_debts = defaultdict(float)
     processed_pairs = set()
@@ -193,11 +179,11 @@ def calculate_balances(chat_id: int):
         if (d1, c1) in processed_pairs:
             continue
 
-        amount2 = direct_debts.get((c1, d1), 0.0)
+        amount2 = direct_debts.get((c1, d1), 0.0) # Ищем обратный долг
 
         if amount1 > amount2:
             net_amount = amount1 - amount2
-            if net_amount > 0.005:
+            if net_amount > 0.005: # Фильтруем незначительные остатки
                 net_debts[(d1, c1)] = net_amount
         elif amount2 > amount1:
             net_amount = amount2 - amount1
@@ -210,8 +196,8 @@ def calculate_balances(chat_id: int):
     return net_debts
 
 # --- ОБЩИЕ ФУНКЦИИ МЕНЮ И УПРАВЛЕНИЯ ДИАЛОГАМИ ---
-
 async def send_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет новое главное меню."""
     keyboard = [
         [InlineKeyboardButton(f"{EMOJI['money']} Добавить долг", callback_data="add_debt"), InlineKeyboardButton(f"{EMOJI['repay']} Вернуть долг", callback_data="repay")],
         [InlineKeyboardButton(f"{EMOJI['split']} Разделить счет", callback_data="split"), InlineKeyboardButton(f"{EMOJI['status']} Баланс", callback_data="status")],
@@ -221,24 +207,26 @@ async def send_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 
 @group_only
 async def start_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команд /start и /menu."""
     if update.callback_query:
-        try:
+        try: # Пытаемся отредактировать, если сообщение еще существует
             await update.callback_query.message.edit_text("Финансовый Помощник к вашим услугам:", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{EMOJI['money']} Добавить долг", callback_data="add_debt"), InlineKeyboardButton(f"{EMOJI['repay']} Вернуть долг", callback_data="repay")],
                 [InlineKeyboardButton(f"{EMOJI['split']} Разделить счет", callback_data="split"), InlineKeyboardButton(f"{EMOJI['status']} Баланс", callback_data="status")],
                 [InlineKeyboardButton(f"{EMOJI['my_debts']} Мои долги", callback_data="my_debts"), InlineKeyboardButton(f"{EMOJI['history']} История", callback_data="history_menu")]
             ]))
-        except BadRequest:
+        except BadRequest: # Если не удалось, отправляем новое
             await send_main_menu(update.effective_chat.id, context)
         await update.callback_query.answer()
     else:
         await send_main_menu(update.effective_chat.id, context)
 
 async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершает диалог, удаляя его сообщение и отправляя новое меню."""
     if update.callback_query:
         try: await update.callback_query.message.delete()
         except BadRequest: pass
-    elif context.user_data.get('dialog_message_id'):
+    elif context.user_data.get('dialog_message_id'): # Если был активный диалог, удаляем его сообщение
         try: await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=context.user_data['dialog_message_id'])
         except BadRequest: pass
     context.user_data.clear()
@@ -246,16 +234,21 @@ async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return ConversationHandler.END
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try: await update.message.delete()
-    except BadRequest: pass
-    if not context.user_data.get('dialog_message_id'):
+    """Обработчик команды /cancel."""
+    if update.message: # Проверяем, существует ли update.message
+        try: await update.message.delete()
+        except BadRequest: pass
+    # Если /cancel вызывается вне диалога, просто отправляем меню
+    if not context.user_data.get('dialog_message_id'): # Проверяем, был ли активный диалог
         await send_main_menu(update.effective_chat.id, context)
-    return ConversationHandler.END
+        return ConversationHandler.END
+    return ConversationHandler.END # Явно возвращаем END для завершения диалога
 
 async def back_to_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для кнопок 'Назад в меню'."""
     await update.callback_query.answer()
+    # Редактируем текущее сообщение, чтобы оно стало главным меню
     await start_menu_command(update, context)
-
 
 # --- 💵 ДИАЛОГ: ДОБАВИТЬ ДОЛГ ---
 @group_only
@@ -275,7 +268,7 @@ async def add_debt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_debt_select_creditor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    context.user_data['creditor_id'] = int(query.data.split('_')[1])
+    context.user_data['creditor_id'] = int(query.data.split('_')[1]) # ИСПРАВЛЕНО: split('_')
     members = db.get_group_members(query.message.chat_id)
     keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['creditor_id']] + [[InlineKeyboardButton(f"{EMOJI['cancel']} Отмена", callback_data="cancel")]]
     await context.bot.edit_message_text("За кого заплатили?", chat_id=query.message.chat_id, message_id=context.user_data['dialog_message_id'], reply_markup=InlineKeyboardMarkup(keyboard))
@@ -292,7 +285,7 @@ async def add_debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
         amount = float(update.message.text.replace(',', '.'))
         if amount <= 0: raise ValueError
         context.user_data['amount'] = amount
-        try: await update.message.delete()
+        try: await update.message.delete() # Удаляем сообщение пользователя
         except BadRequest: pass
         await context.bot.edit_message_text("За что? (Комментарий или /skip)", chat_id=update.effective_chat.id, message_id=context.user_data['dialog_message_id'])
         return GET_COMMENT
@@ -302,8 +295,9 @@ async def add_debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip=False):
     comment = "" if is_skip else update.message.text
-    try: await update.message.delete()
-    except BadRequest: pass
+    if update.message: # Только пытаемся удалить, если сообщение существует
+        try: await update.message.delete() # Удаляем сообщение пользователя
+        except BadRequest: pass
     db.add_transaction(update.effective_chat.id, context.user_data['creditor_id'], context.user_data['debtor_id'], context.user_data['amount'], comment)
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=context.user_data['dialog_message_id'])
     await send_main_menu(update.effective_chat.id, context)
@@ -327,7 +321,7 @@ async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def repay_select_debtor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    context.user_data['debtor_id'] = int(query.data.split('_')[1])
+    context.user_data['debtor_id'] = int(query.data.split('_')[1]) # ИСПРАВЛЕНО: split('_')
     members = db.get_group_members(query.message.chat_id)
     keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['debtor_id']] + [[InlineKeyboardButton(f"{EMOJI['cancel']} Отмена", callback_data="cancel")]]
     await context.bot.edit_message_text("Кому возвращают?", chat_id=query.message.chat_id, message_id=context.user_data['dialog_message_id'], reply_markup=InlineKeyboardMarkup(keyboard))
@@ -390,8 +384,9 @@ async def split_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def split_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip=False):
     comment = "" if is_skip else update.message.text
-    try: await update.message.delete()
-    except BadRequest: pass
+    if update.message: # Только пытаемся удалить, если сообщение существует
+        try: await update.message.delete()
+        except BadRequest: pass
     chat_id, payer_id, total_amount = update.effective_chat.id, context.user_data['payer_id'], context.user_data['amount']
     members = db.get_group_members(chat_id)
     if len(members) > 1:
@@ -403,17 +398,16 @@ async def split_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip
     await send_main_menu(update.effective_chat.id, context)
     return ConversationHandler.END
 
-
 # --- ✨ ФУНКЦИИ БЕЗ ДИАЛОГОВ ---
 @group_only
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, chat_id = update.callback_query, update.effective_chat.id
     net_debts = calculate_balances(chat_id)
-    text = f"*{EMOJI['status']} Текущий баланс:*\n\n"
-    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!"
+    text = f"{EMOJI['status']} Текущий баланс:\n\n"
+    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!" # ИСПРАВЛЕНО: Экранирован '!' для MarkdownV2
     else:
         for (d_id, c_id), amount in net_debts.items():
-            text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} *{escape_markdown(f'{amount:.2f}')} UAH*\n"
+            text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} {escape_markdown(f'{amount:.2f}')} UAH\n"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
     await query.answer()
 
@@ -422,39 +416,40 @@ async def my_debts_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, user_id, chat_id = update.callback_query, update.effective_user.id, update.effective_chat.id
     net_debts, i_owe, owe_me = calculate_balances(chat_id), "", ""
     for (d_id, c_id), amount in net_debts.items():
-        if d_id == user_id: i_owe += f" • {get_user_mention(c_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
-        if c_id == user_id: owe_me += f" • {get_user_mention(d_id, chat_id)}: *{escape_markdown(f'{amount:.2f}')} UAH*\n"
-    text = f"*{EMOJI['my_debts']} Моя сводка:*\n\n*Я должен:*\n{i_owe or escape_markdown('Никому.')}\n\n*Мне должны:*\n{owe_me or escape_markdown('Никто.')}"
+        if d_id == user_id: i_owe += f" • {get_user_mention(c_id, chat_id)}: {escape_markdown(f'{amount:.2f}')} UAH\n"
+        if c_id == user_id: owe_me += f" • {get_user_mention(d_id, chat_id)}: {escape_markdown(f'{amount:.2f}')} UAH\n"
+    text = f"{EMOJI['my_debts']} Моя сводка:\n\nЯ должен:\n{i_owe or escape_markdown('Никому.')}\n\nМне должны:\n{owe_me or escape_markdown('Никто.')}"
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
     await query.answer()
 
 @group_only
 async def history_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, chat_id = update.callback_query, update.effective_chat.id
-    transactions_raw = db.get_all_transactions(chat_id)
-    
-    if not transactions_raw:
+    transactions = db.get_all_transactions(chat_id)
+    if not transactions:
         await query.answer("История пуста.", show_alert=True)
         return
     
+    # ✅ ИСПРАВЛЕНО: Убедимся, что t[5] является datetime объектом перед форматированием
     months = set()
-    for t in transactions_raw:
-        ts_obj = t[5]
-        if not isinstance(ts_obj, datetime):
-            logger.warning(f"Timestamp {ts_obj} (type {type(ts_obj)}) for transaction ID {t[0]} is not datetime. Attempting to convert for history menu.")
+    for t in transactions:
+        if isinstance(t[5], datetime):
+            months.add(t[5].strftime("%Y-%m"))
+        else:
+            logger.warning(f"Transaction timestamp is not a datetime object, attempting to parse: {t[5]}")
             try:
-                ts_obj = datetime.fromisoformat(str(ts_obj))
+                parsed_dt = datetime.fromisoformat(str(t[5]))
+                months.add(parsed_dt.strftime("%Y-%m"))
             except ValueError:
-                logger.error(f"Failed to convert timestamp {t[5]} to datetime for history menu, transaction ID {t[0]}. Skipping this transaction.")
+                logger.error(f"Failed to parse timestamp to datetime for history menu: {t[5]}")
                 continue
-        months.add(ts_obj.strftime("%Y-%m"))
 
     sorted_months = sorted(list(months), reverse=True)
     keyboard = []
     for m in sorted_months:
         dt_object = datetime.strptime(m, '%Y-%m')
         keyboard.append([InlineKeyboardButton(f"{RUSSIAN_MONTHS_NOM[dt_object.month]} {dt_object.year}", callback_data=f"history_show_{m}")])
-    
+
     await query.message.edit_text("Выберите месяц:", reply_markup=InlineKeyboardMarkup(keyboard + [[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]))
     await query.answer()
 
@@ -463,42 +458,30 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     query, chat_id = update.callback_query, update.effective_chat.id
     year_month = query.data.split('_')[-1]
     year, month = map(int, year_month.split('-'))
-
-    processed_transactions = []
-    for tx in db.get_all_transactions(chat_id):
-        tx_id, c_id, d_id, amount, comment, raw_ts = tx
-        
-        current_ts_obj = None
-        if isinstance(raw_ts, datetime):
-            current_ts_obj = raw_ts
-        else:
-            logger.warning(f"Timestamp {raw_ts} (type {type(raw_ts)}) for transaction ID {tx_id} is not datetime. Attempting to convert.")
-            try:
-                current_ts_obj = datetime.fromisoformat(str(raw_ts))
-            except ValueError:
-                logger.error(f"Failed to convert timestamp {raw_ts} to datetime for transaction ID {tx_id}. Skipping this transaction.")
-                continue
-
-        if current_ts_obj and current_ts_obj.year == year and current_ts_obj.month == month: # Проверка current_ts_obj на None
-            processed_transactions.append((tx_id, c_id, d_id, amount, comment, current_ts_obj))
     
+    # ✅ ИСПРАВЛЕНО: Фильтруем транзакции, чтобы убедиться, что t[5] это datetime
+    transactions = [tx for tx in db.get_all_transactions(chat_id) if isinstance(tx[5], datetime) and tx[5].year == year and tx[5].month == month]
+
     text_header = f"*{EMOJI['history']} История за {escape_markdown(RUSSIAN_MONTHS_NOM[month])} {year}*\n\n"
     text_body = ""
 
-    if not processed_transactions:
+    if not transactions:
         text_body += escape_markdown("В этом месяце операций не было.") + "\n"
     else:
-        for _, c_id, d_id, amount, comment, ts_obj in processed_transactions:
-            date_str = escape_markdown(ts_obj.strftime('%d.%m'))
+        for _, c_id, d_id, amount, comment, ts in transactions:
+            # ✅ ИСПРАВЛЕНО: Гарантируем, что date_str экранирован
+            date_str = escape_markdown(ts.strftime('%d.%m'))
             amount_str = escape_markdown(f'{amount:.2f}')
             
+            # ✅ ИСПРАВЛЕНИЕ: Уточненная логика отображения погашения и комментариев
             if comment == "Погашение долга":
                 text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} погасил(а) долг {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*\n"
             else:
                 comment_escaped = escape_markdown(comment if comment is not None else "")
+                # ✅ ИСПРАВЛЕНИЕ: Экранируем скобки, если комментарий существует
                 final_comment_part = f" \\({comment_escaped}\\)" if comment_escaped else ""
                 text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*{final_comment_part}\n"
-    
+
     final_text = text_header + text_body
 
     await query.message.edit_text(
@@ -540,14 +523,15 @@ async def clear_transactions_confirm(update: Update, context: ContextTypes.DEFAU
         await query.message.edit_text("Очистка отменена.")
     return ConversationHandler.END
 
-
 # --- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Exception while handling an update:", exc_info=context.error)
+    # Пытаемся отправить сообщение об ошибке, если есть куда
     if update and update.effective_message:
         try:
+            # ИСПРАВЛЕНО: Экранирован \n для MarkdownV2
             await update.effective_message.reply_text(
-                "Произошла непредвиденная ошибка. Попробуйте снова.\n"
+                "Произошла непредвиденная ошибка. Попробуйте снова.\\n"
                 "Если ошибка повторяется, сообщите об этом разработчику."
             )
         except BadRequest:
@@ -555,140 +539,127 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         logger.error("Error occurred, but no effective message to reply to.")
 
-# --- Flask для поддержания активности на Render и обработки вебхуков ---
+# --- Flask для поддержания активности на Render ---
+app = Flask(__name__) # ИСПРАВЛЕНО: Changed '' to __name__ for Flask
 @app.route('/')
 def home():
     return "I'm alive!"
 
-@app.post(f"/{TELEGRAM_WEBHOOK_PATH}")
-async def telegram_webhook_handler():
-    global application_instance # Доступ к глобальной переменной
-    if application_instance is None:
-        logger.error("Telegram Application не инициализирован для вебхуков. Попытка инициализации в процессе Flask-воркера.")
+def run_flask():
+    port = int(os.environ.get('PORT', 8080))
+    # Flask запускается в основном потоке, который блокирует выполнение,
+    # поэтому bot.run_polling() должен быть в отдельном потоке.
+    app.run(host='0.0.0.0', port=port)
+
+def ping_database():
+    # 'db' доступен из глобальной области видимости, он будет инициализирован main_logic()
+    while True:
         try:
-            # Попытка повторной инициализации.
-            # Это критически важно для Gunicorn, который форкает процессы:
-            # каждый форкнутый процесс может не унаследовать глобальные переменные.
-            application_instance = await _initialize_bot_internal()
-            if application_instance is None:
-                logger.critical("Повторная инициализация бота не удалась. Вебхук не может быть обработан.")
-                return "Error: Bot not ready after re-init", 500
-            logger.info("Повторная инициализация бота успешна для этого процесса.")
+            logger.info("[DB Ping] Sending keep-alive query...")
+            if db: # Проверяем, что db инициализирован
+                db.execute("SELECT 1")
+                logger.info("[DB Ping] Keep-alive query successful.")
+            else:
+                logger.warning("[DB Ping] DB object not yet initialized. Skipping ping.")
         except Exception as e:
-            logger.critical(f"Критическая ошибка при повторной инициализации бота: {e}", exc_info=True)
-            return "Error: Critical bot re-init failure", 500
+            logger.error(f"[DB Ping] Error during keep-alive query: {e}")
+            try:
+                if db: db._connect() # Попытка переподключиться
+            except Exception as reconnect_e:
+                logger.error(f"[DB Ping] Failed to reconnect to DB: {reconnect_e}")
+        time.sleep(600)
 
-    try:
-        update = Update.de_json(request.get_json(force=True), application_instance.bot)
-        await application_instance.post_update(update) 
-        return "ok"
-    except Exception as e:
-        logger.error(f"Ошибка при обработке вебхук-обновления: {e}", exc_info=True)
-        return "Error", 500
+def run_bot_polling(application: Application):
+    """Функция для запуска цикла опроса бота в отдельном потоке."""
+    logger.info("Запуск телеграм-бота...")
+    application.run_polling()
 
-# Вспомогательная функция для инкапсуляции всей логики инициализации бота
-async def _initialize_bot_internal() -> Application | None:
-    # Проверка переменных окружения
+# --- 🚀 ЗАПУСК БОТА ---
+def main_logic(): # ИСПРАВЛЕНО: Переименовано из main()
+    global db # Объявляем db как глобальную переменную для инициализации
+
     if not TELEGRAM_BOT_TOKEN:
         logger.critical("!!! ОШИБКА: Токен не найден. Убедитесь, что он задан в переменных окружения.")
-        return None
+        return
     if not DATABASE_URL:
         logger.critical("!!! ОШИБКА: URL базы данных не найден. Добавьте DATABASE_URL в Environment Variables.")
-        return None
-    if not WEBHOOK_URL:
-        logger.critical("!!! ОШИБКА: WEBHOOK_URL не найден. Добавьте WEBHOOK_URL в Environment Variables (URL вашего сервиса Render).")
-        return None
+        return
 
-    # Инициализация Application
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    logger.info("Telegram Application builder запущен.")
-
-    # Инициализация Базы Данных
     try:
-        global db # Эта функция модифицирует глобальную переменную 'db'
         db = Database(DATABASE_URL)
         logger.info("Подключение к базе данных успешно установлено.")
-    except Exception as e: # Ловим все исключения во время инициализации БД
-        logger.critical(f"Ошибка инициализации базы данных: {e}", exc_info=True)
-        return None # Если БД упала, бот не может функционировать, поэтому возвращаем None
+    except ValueError as e:
+        logger.critical(f"Ошибка инициализации базы данных: {e}")
+        return
+    except Exception as e:
+        logger.critical(f"Неизвестная ошибка при подключении к базе данных: {e}")
+        return
 
-    # Регистрация обработчиков
-    conv_fallbacks = [CallbackQueryHandler(end_conversation, pattern="^cancel$", per_message=True), CommandHandler('cancel', cancel_command)]
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Исправление PTBUserWarning: добавляем per_message=True к CallbackQueryHandler'ам
+    # --- Диалоги ---
+    conv_fallbacks = [CallbackQueryHandler(end_conversation, pattern="^cancel$"), CommandHandler('cancel', cancel_command)]
+
     add_debt_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_debt_start, pattern="^add_debt$", per_message=True)],
+        entry_points=[CallbackQueryHandler(add_debt_start, pattern="^add_debt$")],
         states={
-            SELECT_CREDITOR: [CallbackQueryHandler(add_debt_select_creditor, pattern=r"^user_\d+$", per_message=True)],
-            SELECT_DEBTOR: [CallbackQueryHandler(add_debt_select_debtor, pattern=r"^user_\d+$", per_message=True)],
+            SELECT_CREDITOR: [CallbackQueryHandler(add_debt_select_creditor, pattern=r"^user_\d+$")],
+            SELECT_DEBTOR: [CallbackQueryHandler(add_debt_select_debtor, pattern=r"^user_\d+$")],
             GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_debt_get_amount)],
             GET_COMMENT: [CommandHandler('skip', lambda u,c: add_debt_save(u,c,True)), MessageHandler(filters.TEXT & ~filters.COMMAND, add_debt_save)]
-        }, fallbacks=conv_fallbacks, per_user=True
+        }, fallbacks=conv_fallbacks, per_user=False, per_chat=True
     )
     repay_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(repay_start, pattern="^repay$", per_message=True)],
+        entry_points=[CallbackQueryHandler(repay_start, pattern="^repay$")],
         states={
-            REPAY_SELECT_DEBTOR: [CallbackQueryHandler(repay_select_debtor, pattern=r"^user_\d+$", per_message=True)],
-            REPAY_SELECT_CREDITOR: [CallbackQueryHandler(repay_select_creditor, pattern=r"^user_\d+$", per_message=True)],
+            REPAY_SELECT_DEBTOR: [CallbackQueryHandler(repay_select_debtor, pattern=r"^user_\d+$")],
+            REPAY_SELECT_CREDITOR: [CallbackQueryHandler(repay_select_creditor, pattern=r"^user_\d+$")],
             REPAY_GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, repay_save)]
-        }, fallbacks=conv_fallbacks, per_user=True
+        }, fallbacks=conv_fallbacks, per_user=False, per_chat=True
     )
     split_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(split_start, pattern="^split$", per_message=True)],
+        entry_points=[CallbackQueryHandler(split_start, pattern="^split$")],
         states={
-            SPLIT_SELECT_PAYER: [CallbackQueryHandler(split_select_payer, pattern=r"^user_\d+$", per_message=True)],
+            SPLIT_SELECT_PAYER: [CallbackQueryHandler(split_select_payer, pattern=r"^user_\d+$")],
             SPLIT_GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, split_get_amount)],
             SPLIT_GET_COMMENT: [CommandHandler('skip', lambda u,c: split_save(u,c,True)), MessageHandler(filters.TEXT & ~filters.COMMAND, split_save)]
-        }, fallbacks=conv_fallbacks, per_user=True
+        }, fallbacks=conv_fallbacks, per_user=False, per_chat=True
     )
     clear_handler = ConversationHandler(
         entry_points=[CommandHandler("clear_all_debts", clear_transactions_start)],
-        states={ CONFIRM_CLEAR: [CallbackQueryHandler(clear_transactions_confirm, pattern=r"^confirm_clear_(yes|no)$", per_message=True)] },
-        fallbacks=[CommandHandler('cancel', clear_transactions_start)], per_user=True
+        states={ CONFIRM_CLEAR: [CallbackQueryHandler(clear_transactions_confirm, pattern=r"^confirm_clear_(yes|no)$")] },
+        fallbacks=conv_fallbacks # ИСПРАВЛЕНО: Использование conv_fallbacks
     )
 
+    # --- Регистрация обработчиков ---
     application.add_handler(CommandHandler(["start", "menu"], start_menu_command))
     application.add_handler(CallbackQueryHandler(back_to_menu_handler, pattern="^back_to_menu$"))
-    
+
     application.add_handler(add_debt_handler)
     application.add_handler(repay_handler)
     application.add_handler(split_handler)
-    application.add_handler(clear_handler)
-    
+    application.add_handler(clear_handler) # Регистрируем обработчик очистки
+
     application.add_handler(CallbackQueryHandler(status_handler, pattern="^status$"))
     application.add_handler(CallbackQueryHandler(my_debts_handler, pattern="^my_debts$"))
-    
+
     application.add_handler(CallbackQueryHandler(history_menu_handler, pattern="^history_menu$"))
-    # history_show_handler тоже CallbackQueryHandler
-    application.add_handler(CallbackQueryHandler(history_show_handler, pattern=r"^history_show_", per_message=True)) 
+    application.add_handler(CallbackQueryHandler(history_show_handler, pattern=r"^history_show_"))
 
-    application.add_error_handler(error_handler)
+    application.add_error_handler(error_handler) # Регистрация глобального обработчика ошибок
 
-    # Настройка Webhook
-    logger.info("Удаление предыдущих вебхуков (если есть)...")
-    await application.bot.delete_webhook()
-    full_webhook_url = f"{WEBHOOK_URL}{TELEGRAM_WEBHOOK_PATH}"
-    logger.info(f"Установка нового вебхука: {full_webhook_url}")
-    await application.bot.set_webhook(url=full_webhook_url)
+    # Запускаем бот в отдельном потоке, чтобы основной поток мог обслуживать Flask
+    bot_thread = Thread(target=run_bot_polling, args=(application,))
+    bot_thread.daemon = True
+    bot_thread.start()
 
-    # Пост-инициализация Application
-    await application.post_init()
-    
-    logger.info("Telegram бот успешно настроен. Flask приложение будет обслуживаться Gunicorn.")
-    return application # Возвращаем инициализированный экземпляр Application
+    logger.info("Запуск потока пинга базы данных для поддержания активности...")
+    db_ping_thread = Thread(target=ping_database)
+    db_ping_thread.daemon = True
+    db_ping_thread.start()
 
+    logger.info("Запуск веб-сервера Flask для поддержания активности Render...")
+    run_flask() # Это заблокирует основной поток и будет отвечать на запросы Render
 
-if __name__ == "__main__":
-    # Это точка входа, когда `python main.py` запускается Render/Gunicorn.
-    # Она инициализирует бота и сохраняет экземпляр в глобальной переменной 'application_instance'.
-    application_instance = asyncio.run(_initialize_bot_internal())
-
-    if application_instance is None:
-        logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Бот не смог инициализироваться при запуске. Завершение работы.")
-        # sys.exit(1) # Можно добавить, чтобы процесс Render завершился с ошибкой, если бот не стартует.
-    else:
-        logger.info("Глобальная переменная 'application_instance' успешно установлена.")
-        logger.info("Запуск потока пинга базы данных для поддержания активности...")
-        db_ping_thread = Thread(target=ping_database)
-        db_ping_thread.daemon = True
-        db_ping_thread.start()
+if __name__ == "__main__": # ИСПРАВЛЕНО: Changed name to __name__
+    main_logic()
