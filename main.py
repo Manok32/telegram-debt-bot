@@ -1,5 +1,5 @@
 import logging
-import sqlite3
+import sqlite3 # Оставлено для совместимости, но не используется напрямую с Postgres
 import os
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -26,7 +26,7 @@ from telegram.error import BadRequest
 # --- ⚙️ НАСТРОЙКИ ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '1062630993')
+MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '0')
 try:
     MY_ADMIN_ID = int(MY_ADMIN_ID)
 except ValueError:
@@ -444,7 +444,6 @@ async def history_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 months.add(parsed_dt.strftime("%Y-%m"))
             except ValueError:
                 logger.error(f"Failed to parse timestamp to datetime for history menu: {t[5]}")
-                # Пропускаем эту запись, чтобы не ломать меню
                 continue
 
     sorted_months = sorted(list(months), reverse=True)
@@ -476,14 +475,13 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             date_str = escape_markdown(ts.strftime('%d.%m'))
             amount_str = escape_markdown(f'{amount:.2f}')
             
-            # ✅ ИСПРАВЛЕНО: Уточненная логика отображения погашения
+            # ✅ ИСПРАВЛЕНИЕ: Уточненная логика отображения погашения и комментариев
             if comment == "Погашение долга":
-                # d_id - это тот, кто вернул; c_id - тот, кому вернули (для погашения)
                 text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} погасил(а) долг {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*\n"
             else:
-                # c_id - это кредитор; d_id - это должник
-                comment_escaped = escape_markdown(comment if comment is not None else "") # Гарантируем, что comment - строка
-                final_comment_part = f" ({comment_escaped})" if comment_escaped else ""
+                comment_escaped = escape_markdown(comment if comment is not None else "")
+                # ✅ ИСПРАВЛЕНИЕ: Экранируем скобки, если комментарий существует
+                final_comment_part = f" \\({comment_escaped}\\)" if comment_escaped else ""
                 text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*{final_comment_part}\n"
     
     final_text = text_header + text_body
@@ -662,4 +660,3 @@ if __name__ == "__main__":
     db_ping_thread.start()
 
     main()
-
