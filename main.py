@@ -28,7 +28,7 @@ from telegram.error import BadRequest
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '1062630993')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL') 
 TELEGRAM_WEBHOOK_PATH = os.environ.get('TELEGRAM_WEBHOOK_PATH', 'telegram')
 
 # --- 🪵 ЛОГИРОВАНИЕ ---
@@ -690,3 +690,4 @@ if __name__ == "__main__":
     db_ping_thread = Thread(target=ping_database)
     db_ping_thread.daemon = True
     db_ping_thread.start()
+
