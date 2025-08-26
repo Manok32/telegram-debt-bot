@@ -15,6 +15,7 @@ from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, constants
 from telegram.ext import (
     Application,
+    ApplicationBuilder, # ✅ Использование ApplicationBuilder для ясности
     CommandHandler,
     CallbackQueryHandler,
     ConversationHandler,
@@ -152,7 +153,7 @@ class Database:
 # --- Инициализация DB и Application (Глобальные объекты) ---
 app = Flask(__name__)
 db: Database = None
-application: Application = None
+application_instance: Application = None # Глобальная переменная для экземпляра Application
 
 # --- 🧑‍🔧 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def group_only(func):
@@ -309,6 +310,7 @@ async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_s
     return ConversationHandler.END
 
 # --- 💸 ДИАЛОГ: ВЕРНУТЬ ДОЛГ ---
+@group_only
 async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     try: await query.message.delete()
@@ -344,7 +346,6 @@ async def repay_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await update.message.delete()
         except BadRequest: pass
         db.add_transaction(update.effective_chat.id, context.user_data['debtor_id'], context.user_data['creditor_id'], amount, "Погашение долга")
-        # ✅ ИСПРАВЛЕНИЕ SyntaxError: Эти строки должны быть внутри блока try
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=context.user_data['dialog_message_id'])
         await send_main_menu(update.effective_chat.id, context)
         return ConversationHandler.END
@@ -478,7 +479,7 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.error(f"Failed to convert timestamp {raw_ts} to datetime for transaction ID {tx_id}. Skipping this transaction.")
                 continue
 
-        if current_ts_obj.year == year and current_ts_obj.month == month:
+        if current_ts_obj and current_ts_obj.year == year and current_ts_obj.month == month: # Проверка current_ts_obj на None
             processed_transactions.append((tx_id, c_id, d_id, amount, comment, current_ts_obj))
     
     text_header = f"*{EMOJI['history']} История за {escape_markdown(RUSSIAN_MONTHS_NOM[month])} {year}*\n\n"
@@ -561,107 +562,88 @@ def home():
 
 @app.post(f"/{TELEGRAM_WEBHOOK_PATH}")
 async def telegram_webhook_handler():
-    global application
-    if application is None:
-        logger.error("Telegram Application не инициализирован для вебхуков. Попытка инициализации.")
+    global application_instance # Доступ к глобальной переменной
+    if application_instance is None:
+        logger.error("Telegram Application не инициализирован для вебхуков. Попытка инициализации в процессе Flask-воркера.")
         try:
-            await init_bot()
-            if application is None:
+            # Попытка повторной инициализации.
+            # Это критически важно для Gunicorn, который форкает процессы:
+            # каждый форкнутый процесс может не унаследовать глобальные переменные.
+            application_instance = await _initialize_bot_internal()
+            if application_instance is None:
+                logger.critical("Повторная инициализация бота не удалась. Вебхук не может быть обработан.")
                 return "Error: Bot not ready after re-init", 500
+            logger.info("Повторная инициализация бота успешна для этого процесса.")
         except Exception as e:
             logger.critical(f"Критическая ошибка при повторной инициализации бота: {e}", exc_info=True)
             return "Error: Critical bot re-init failure", 500
 
     try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        await application.post_update(update) 
+        update = Update.de_json(request.get_json(force=True), application_instance.bot)
+        await application_instance.post_update(update) 
         return "ok"
     except Exception as e:
         logger.error(f"Ошибка при обработке вебхук-обновления: {e}", exc_info=True)
         return "Error", 500
 
-def ping_database():
-    global db 
-    while True:
-        try:
-            logger.info("[DB Ping] Отправка запроса на проверку активности...")
-            if db: 
-                db.execute("SELECT 1")
-                logger.info("[DB Ping] Запрос активности успешно выполнен.")
-            else:
-                logger.warning("[DB Ping] Объект базы данных ещё не инициализирован (неожиданно). Пропуск пинга.")
-        except Exception as e:
-            logger.error(f"[DB Ping] Ошибка во время запроса активности: {e}")
-            try:
-                if db: db._connect()
-            except Exception as reconnect_e:
-                logger.error(f"[DB Ping] Не удалось переподключиться к базе данных: {reconnect_e}")
-        time.sleep(600)
-
-# --- 🚀 ЗАПУСК БОТА ---
-async def init_bot():
-    global db, application
-    
+# Вспомогательная функция для инкапсуляции всей логики инициализации бота
+async def _initialize_bot_internal() -> Application | None:
+    # Проверка переменных окружения
     if not TELEGRAM_BOT_TOKEN:
         logger.critical("!!! ОШИБКА: Токен не найден. Убедитесь, что он задан в переменных окружения.")
-        return
+        return None
     if not DATABASE_URL:
         logger.critical("!!! ОШИБКА: URL базы данных не найден. Добавьте DATABASE_URL в Environment Variables.")
-        return
+        return None
     if not WEBHOOK_URL:
         logger.critical("!!! ОШИБКА: WEBHOOK_URL не найден. Добавьте WEBHOOK_URL в Environment Variables (URL вашего сервиса Render).")
-        return
+        return None
 
-    if application is None:
-        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        logger.info("Telegram Application builder запущен.")
+    # Инициализация Application
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    logger.info("Telegram Application builder запущен.")
 
+    # Инициализация Базы Данных
     try:
+        global db # Эта функция модифицирует глобальную переменную 'db'
         db = Database(DATABASE_URL)
         logger.info("Подключение к базе данных успешно установлено.")
-    except ValueError as e:
-        logger.critical(f"Ошибка инициализации базы данных: {e}")
-        application = None
-        return
-    except Exception as e:
-        logger.critical(f"Неизвестная ошибка при подключении к базе данных: {e}")
-        application = None
-        return
+    except Exception as e: # Ловим все исключения во время инициализации БД
+        logger.critical(f"Ошибка инициализации базы данных: {e}", exc_info=True)
+        return None # Если БД упала, бот не может функционировать, поэтому возвращаем None
 
-    if application is None:
-        logger.critical("Application не был инициализирован из-за ошибок DB. Бот не может быть запущен.")
-        return
+    # Регистрация обработчиков
+    conv_fallbacks = [CallbackQueryHandler(end_conversation, pattern="^cancel$", per_message=True), CommandHandler('cancel', cancel_command)]
 
-    conv_fallbacks = [CallbackQueryHandler(end_conversation, pattern="^cancel$"), CommandHandler('cancel', cancel_command)]
-
+    # Исправление PTBUserWarning: добавляем per_message=True к CallbackQueryHandler'ам
     add_debt_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_debt_start, pattern="^add_debt$")],
+        entry_points=[CallbackQueryHandler(add_debt_start, pattern="^add_debt$", per_message=True)],
         states={
-            SELECT_CREDITOR: [CallbackQueryHandler(add_debt_select_creditor, pattern=r"^user_\d+$")],
-            SELECT_DEBTOR: [CallbackQueryHandler(add_debt_select_debtor, pattern=r"^user_\d+$")],
+            SELECT_CREDITOR: [CallbackQueryHandler(add_debt_select_creditor, pattern=r"^user_\d+$", per_message=True)],
+            SELECT_DEBTOR: [CallbackQueryHandler(add_debt_select_debtor, pattern=r"^user_\d+$", per_message=True)],
             GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_debt_get_amount)],
             GET_COMMENT: [CommandHandler('skip', lambda u,c: add_debt_save(u,c,True)), MessageHandler(filters.TEXT & ~filters.COMMAND, add_debt_save)]
         }, fallbacks=conv_fallbacks, per_user=True
     )
     repay_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(repay_start, pattern="^repay$")],
+        entry_points=[CallbackQueryHandler(repay_start, pattern="^repay$", per_message=True)],
         states={
-            REPAY_SELECT_DEBTOR: [CallbackQueryHandler(repay_select_debtor, pattern=r"^user_\d+$")],
-            REPAY_SELECT_CREDITOR: [CallbackQueryHandler(repay_select_creditor, pattern=r"^user_\d+$")],
+            REPAY_SELECT_DEBTOR: [CallbackQueryHandler(repay_select_debtor, pattern=r"^user_\d+$", per_message=True)],
+            REPAY_SELECT_CREDITOR: [CallbackQueryHandler(repay_select_creditor, pattern=r"^user_\d+$", per_message=True)],
             REPAY_GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, repay_save)]
         }, fallbacks=conv_fallbacks, per_user=True
     )
     split_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(split_start, pattern="^split$")],
+        entry_points=[CallbackQueryHandler(split_start, pattern="^split$", per_message=True)],
         states={
-            SPLIT_SELECT_PAYER: [CallbackQueryHandler(split_select_payer, pattern=r"^user_\d+$")],
+            SPLIT_SELECT_PAYER: [CallbackQueryHandler(split_select_payer, pattern=r"^user_\d+$", per_message=True)],
             SPLIT_GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, split_get_amount)],
             SPLIT_GET_COMMENT: [CommandHandler('skip', lambda u,c: split_save(u,c,True)), MessageHandler(filters.TEXT & ~filters.COMMAND, split_save)]
         }, fallbacks=conv_fallbacks, per_user=True
     )
     clear_handler = ConversationHandler(
         entry_points=[CommandHandler("clear_all_debts", clear_transactions_start)],
-        states={ CONFIRM_CLEAR: [CallbackQueryHandler(clear_transactions_confirm, pattern=r"^confirm_clear_(yes|no)$")] },
+        states={ CONFIRM_CLEAR: [CallbackQueryHandler(clear_transactions_confirm, pattern=r"^confirm_clear_(yes|no)$", per_message=True)] },
         fallbacks=[CommandHandler('cancel', clear_transactions_start)], per_user=True
     )
 
@@ -677,25 +659,36 @@ async def init_bot():
     application.add_handler(CallbackQueryHandler(my_debts_handler, pattern="^my_debts$"))
     
     application.add_handler(CallbackQueryHandler(history_menu_handler, pattern="^history_menu$"))
-    application.add_handler(CallbackQueryHandler(history_show_handler, pattern=r"^history_show_"))
+    # history_show_handler тоже CallbackQueryHandler
+    application.add_handler(CallbackQueryHandler(history_show_handler, pattern=r"^history_show_", per_message=True)) 
 
     application.add_error_handler(error_handler)
 
+    # Настройка Webhook
     logger.info("Удаление предыдущих вебхуков (если есть)...")
     await application.bot.delete_webhook()
     full_webhook_url = f"{WEBHOOK_URL}{TELEGRAM_WEBHOOK_PATH}"
     logger.info(f"Установка нового вебхука: {full_webhook_url}")
     await application.bot.set_webhook(url=full_webhook_url)
 
+    # Пост-инициализация Application
     await application.post_init()
     
     logger.info("Telegram бот успешно настроен. Flask приложение будет обслуживаться Gunicorn.")
+    return application # Возвращаем инициализированный экземпляр Application
 
 
 if __name__ == "__main__":
-    asyncio.run(init_bot())
+    # Это точка входа, когда `python main.py` запускается Render/Gunicorn.
+    # Она инициализирует бота и сохраняет экземпляр в глобальной переменной 'application_instance'.
+    application_instance = asyncio.run(_initialize_bot_internal())
 
-    logger.info("Запуск потока пинга базы данных для поддержания активности...")
-    db_ping_thread = Thread(target=ping_database)
-    db_ping_thread.daemon = True
-    db_ping_thread.start()
+    if application_instance is None:
+        logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Бот не смог инициализироваться при запуске. Завершение работы.")
+        # sys.exit(1) # Можно добавить, чтобы процесс Render завершился с ошибкой, если бот не стартует.
+    else:
+        logger.info("Глобальная переменная 'application_instance' успешно установлена.")
+        logger.info("Запуск потока пинга базы данных для поддержания активности...")
+        db_ping_thread = Thread(target=ping_database)
+        db_ping_thread.daemon = True
+        db_ping_thread.start()
