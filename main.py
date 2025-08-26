@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
 import time
+from threading import Thread # ✅ ДОБАВЛЕН ЭТОТ ИМПОРТ
 
 import psycopg2
 from urllib.parse import urlparse
@@ -661,3 +662,4 @@ if __name__ == "__main__":
     db_ping_thread.start()
 
     main()
+
