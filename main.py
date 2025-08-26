@@ -28,7 +28,7 @@ MY_ADMIN_ID = os.environ.get('MY_ADMIN_ID', '0')
 
 # --- 🪵 ЛОГИРОВАНИЕ ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__) # ИСПРАВЛЕНО: Changed name to __name__
+logger = logging.getLogger(__name__)
 
 try:
     MY_ADMIN_ID = int(MY_ADMIN_ID)
@@ -52,12 +52,11 @@ CONFIRM_CLEAR = 10
 
 # --- 🗃️ КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (PostgreSQL) ---
 class Database:
-    # ИСПРАВЛЕНО: Changed init to __init__
     def __init__(self, conn_url):
         if not conn_url:
             raise ValueError("DATABASE_URL не найден. Убедитесь, что он добавлен в Environment Variables.")
         self.conn_url = conn_url
-        self.conn = None # Initialize conn to None
+        self.conn = None
         self._connect()
         self.init_db()
 
@@ -156,21 +155,18 @@ def group_only(func):
 
 def escape_markdown(text: str) -> str:
     # Символы, которые нужно экранировать в MarkdownV2
-    escape_chars = r'_*~`>#+-=|{}.!' # . и ! включены
-    # ИСПРАВЛЕНО: Добавлен обратный слеш перед каждым экранируемым символом
+    escape_chars = r'_*~`>#+-=|{}.!'
     return "".join(f'\{char}' if char in escape_chars else char for char in str(text))
 
 def get_user_mention(user_id, chat_id):
     name = db.get_user_name(user_id, chat_id)
-    # ИСПРАВЛЕНО: Формат упоминания для MarkdownV2
     return f"[{escape_markdown(name)}](tg://user?id={user_id})"
 
-# ✅ ИСПРАВЛЕННЫЙ И СТАБИЛЬНЫЙ АЛГОРИТМ РАСЧЕТА БАЛАНСОВ
 def calculate_balances(chat_id: int):
     direct_debts = defaultdict(float) # (должник, кредитор) -> сумма всех долгов
     transactions = db.get_all_transactions(chat_id)
     for _, creditor_id, debtor_id, amount, _, _ in transactions:
-        direct_debts[(debtor_id, creditor_id)] += float(amount) # Преобразуем amount в float
+        direct_debts[(debtor_id, creditor_id)] += float(amount)
 
     net_debts = defaultdict(float)
     processed_pairs = set()
@@ -179,11 +175,11 @@ def calculate_balances(chat_id: int):
         if (d1, c1) in processed_pairs:
             continue
 
-        amount2 = direct_debts.get((c1, d1), 0.0) # Ищем обратный долг
+        amount2 = direct_debts.get((c1, d1), 0.0)
 
         if amount1 > amount2:
             net_amount = amount1 - amount2
-            if net_amount > 0.005: # Фильтруем незначительные остатки
+            if net_amount > 0.005:
                 net_debts[(d1, c1)] = net_amount
         elif amount2 > amount1:
             net_amount = amount2 - amount1
@@ -235,19 +231,16 @@ async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /cancel."""
-    if update.message: # Проверяем, существует ли update.message
+    if update.message:
         try: await update.message.delete()
         except BadRequest: pass
-    # Если /cancel вызывается вне диалога, просто отправляем меню
-    if not context.user_data.get('dialog_message_id'): # Проверяем, был ли активный диалог
+    if not context.user_data.get('dialog_message_id'):
         await send_main_menu(update.effective_chat.id, context)
-        return ConversationHandler.END
-    return ConversationHandler.END # Явно возвращаем END для завершения диалога
+    return ConversationHandler.END
 
 async def back_to_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик для кнопок 'Назад в меню'."""
     await update.callback_query.answer()
-    # Редактируем текущее сообщение, чтобы оно стало главным меню
     await start_menu_command(update, context)
 
 # --- 💵 ДИАЛОГ: ДОБАВИТЬ ДОЛГ ---
@@ -268,7 +261,7 @@ async def add_debt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_debt_select_creditor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    context.user_data['creditor_id'] = int(query.data.split('_')[1]) # ИСПРАВЛЕНО: split('_')
+    context.user_data['creditor_id'] = int(query.data.split('_')[1])
     members = db.get_group_members(query.message.chat_id)
     keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['creditor_id']] + [[InlineKeyboardButton(f"{EMOJI['cancel']} Отмена", callback_data="cancel")]]
     await context.bot.edit_message_text("За кого заплатили?", chat_id=query.message.chat_id, message_id=context.user_data['dialog_message_id'], reply_markup=InlineKeyboardMarkup(keyboard))
@@ -285,7 +278,7 @@ async def add_debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
         amount = float(update.message.text.replace(',', '.'))
         if amount <= 0: raise ValueError
         context.user_data['amount'] = amount
-        try: await update.message.delete() # Удаляем сообщение пользователя
+        try: await update.message.delete()
         except BadRequest: pass
         await context.bot.edit_message_text("За что? (Комментарий или /skip)", chat_id=update.effective_chat.id, message_id=context.user_data['dialog_message_id'])
         return GET_COMMENT
@@ -295,8 +288,8 @@ async def add_debt_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip=False):
     comment = "" if is_skip else update.message.text
-    if update.message: # Только пытаемся удалить, если сообщение существует
-        try: await update.message.delete() # Удаляем сообщение пользователя
+    if update.message:
+        try: await update.message.delete()
         except BadRequest: pass
     db.add_transaction(update.effective_chat.id, context.user_data['creditor_id'], context.user_data['debtor_id'], context.user_data['amount'], comment)
     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=context.user_data['dialog_message_id'])
@@ -321,7 +314,7 @@ async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def repay_select_debtor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
-    context.user_data['debtor_id'] = int(query.data.split('_')[1]) # ИСПРАВЛЕНО: split('_')
+    context.user_data['debtor_id'] = int(query.data.split('_')[1])
     members = db.get_group_members(query.message.chat_id)
     keyboard = [[InlineKeyboardButton(name, callback_data=f"user_{uid}")] for uid, name in members if uid != context.user_data['debtor_id']] + [[InlineKeyboardButton(f"{EMOJI['cancel']} Отмена", callback_data="cancel")]]
     await context.bot.edit_message_text("Кому возвращают?", chat_id=query.message.chat_id, message_id=context.user_data['dialog_message_id'], reply_markup=InlineKeyboardMarkup(keyboard))
@@ -384,7 +377,7 @@ async def split_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def split_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_skip=False):
     comment = "" if is_skip else update.message.text
-    if update.message: # Только пытаемся удалить, если сообщение существует
+    if update.message:
         try: await update.message.delete()
         except BadRequest: pass
     chat_id, payer_id, total_amount = update.effective_chat.id, context.user_data['payer_id'], context.user_data['amount']
@@ -404,7 +397,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, chat_id = update.callback_query, update.effective_chat.id
     net_debts = calculate_balances(chat_id)
     text = f"{EMOJI['status']} Текущий баланс:\n\n"
-    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!" # ИСПРАВЛЕНО: Экранирован '!' для MarkdownV2
+    if not net_debts: text += f"{EMOJI['party']} Все в расчете\\!"
     else:
         for (d_id, c_id), amount in net_debts.items():
             text += f"{get_user_mention(d_id, chat_id)} должен {get_user_mention(c_id, chat_id)} {escape_markdown(f'{amount:.2f}')} UAH\n"
@@ -430,7 +423,6 @@ async def history_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("История пуста.", show_alert=True)
         return
     
-    # ✅ ИСПРАВЛЕНО: Убедимся, что t[5] является datetime объектом перед форматированием
     months = set()
     for t in transactions:
         if isinstance(t[5], datetime):
@@ -459,7 +451,6 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     year_month = query.data.split('_')[-1]
     year, month = map(int, year_month.split('-'))
     
-    # ✅ ИСПРАВЛЕНО: Фильтруем транзакции, чтобы убедиться, что t[5] это datetime
     transactions = [tx for tx in db.get_all_transactions(chat_id) if isinstance(tx[5], datetime) and tx[5].year == year and tx[5].month == month]
 
     text_header = f"*{EMOJI['history']} История за {escape_markdown(RUSSIAN_MONTHS_NOM[month])} {year}*\n\n"
@@ -469,16 +460,13 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text_body += escape_markdown("В этом месяце операций не было.") + "\n"
     else:
         for _, c_id, d_id, amount, comment, ts in transactions:
-            # ✅ ИСПРАВЛЕНО: Гарантируем, что date_str экранирован
             date_str = escape_markdown(ts.strftime('%d.%m'))
             amount_str = escape_markdown(f'{amount:.2f}')
             
-            # ✅ ИСПРАВЛЕНИЕ: Уточненная логика отображения погашения и комментариев
             if comment == "Погашение долга":
                 text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} погасил(а) долг {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*\n"
             else:
                 comment_escaped = escape_markdown(comment if comment is not None else "")
-                # ✅ ИСПРАВЛЕНИЕ: Экранируем скобки, если комментарий существует
                 final_comment_part = f" \\({comment_escaped}\\)" if comment_escaped else ""
                 text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*{final_comment_part}\n"
 
@@ -526,10 +514,8 @@ async def clear_transactions_confirm(update: Update, context: ContextTypes.DEFAU
 # --- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Exception while handling an update:", exc_info=context.error)
-    # Пытаемся отправить сообщение об ошибке, если есть куда
     if update and update.effective_message:
         try:
-            # ИСПРАВЛЕНО: Экранирован \n для MarkdownV2
             await update.effective_message.reply_text(
                 "Произошла непредвиденная ошибка. Попробуйте снова.\\n"
                 "Если ошибка повторяется, сообщите об этом разработчику."
@@ -540,23 +526,19 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error("Error occurred, but no effective message to reply to.")
 
 # --- Flask для поддержания активности на Render ---
-app = Flask(__name__) # ИСПРАВЛЕНО: Changed '' to __name__ for Flask
+app = Flask(__name__)
 @app.route('/')
 def home():
     return "I'm alive!"
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
-    # Flask запускается в основном потоке, который блокирует выполнение,
-    # поэтому bot.run_polling() должен быть в отдельном потоке.
     app.run(host='0.0.0.0', port=port)
 
 def ping_database():
-    # 'db' доступен из глобальной области видимости, он будет инициализирован main_logic()
     while True:
         try:
-            logger.info("[DB Ping] Sending keep-alive query...")
-            if db: # Проверяем, что db инициализирован
+            if db:
                 db.execute("SELECT 1")
                 logger.info("[DB Ping] Keep-alive query successful.")
             else:
@@ -564,19 +546,14 @@ def ping_database():
         except Exception as e:
             logger.error(f"[DB Ping] Error during keep-alive query: {e}")
             try:
-                if db: db._connect() # Попытка переподключиться
+                if db: db._connect()
             except Exception as reconnect_e:
                 logger.error(f"[DB Ping] Failed to reconnect to DB: {reconnect_e}")
         time.sleep(600)
 
-def run_bot_polling(application: Application):
-    """Функция для запуска цикла опроса бота в отдельном потоке."""
-    logger.info("Запуск телеграм-бота...")
-    application.run_polling()
-
 # --- 🚀 ЗАПУСК БОТА ---
-def main_logic(): # ИСПРАВЛЕНО: Переименовано из main()
-    global db # Объявляем db как глобальную переменную для инициализации
+def main_logic():
+    global db
 
     if not TELEGRAM_BOT_TOKEN:
         logger.critical("!!! ОШИБКА: Токен не найден. Убедитесь, что он задан в переменных окружения.")
@@ -628,7 +605,7 @@ def main_logic(): # ИСПРАВЛЕНО: Переименовано из main()
     clear_handler = ConversationHandler(
         entry_points=[CommandHandler("clear_all_debts", clear_transactions_start)],
         states={ CONFIRM_CLEAR: [CallbackQueryHandler(clear_transactions_confirm, pattern=r"^confirm_clear_(yes|no)$")] },
-        fallbacks=conv_fallbacks # ИСПРАВЛЕНО: Использование conv_fallbacks
+        fallbacks=conv_fallbacks
     )
 
     # --- Регистрация обработчиков ---
@@ -638,7 +615,7 @@ def main_logic(): # ИСПРАВЛЕНО: Переименовано из main()
     application.add_handler(add_debt_handler)
     application.add_handler(repay_handler)
     application.add_handler(split_handler)
-    application.add_handler(clear_handler) # Регистрируем обработчик очистки
+    application.add_handler(clear_handler)
 
     application.add_handler(CallbackQueryHandler(status_handler, pattern="^status$"))
     application.add_handler(CallbackQueryHandler(my_debts_handler, pattern="^my_debts$"))
@@ -646,20 +623,20 @@ def main_logic(): # ИСПРАВЛЕНО: Переименовано из main()
     application.add_handler(CallbackQueryHandler(history_menu_handler, pattern="^history_menu$"))
     application.add_handler(CallbackQueryHandler(history_show_handler, pattern=r"^history_show_"))
 
-    application.add_error_handler(error_handler) # Регистрация глобального обработчика ошибок
+    application.add_error_handler(error_handler)
 
-    # Запускаем бот в отдельном потоке, чтобы основной поток мог обслуживать Flask
-    bot_thread = Thread(target=run_bot_polling, args=(application,))
-    bot_thread.daemon = True
-    bot_thread.start()
-
+    # Запускаем поток пинга базы данных перед запуском Flask
     logger.info("Запуск потока пинга базы данных для поддержания активности...")
     db_ping_thread = Thread(target=ping_database)
     db_ping_thread.daemon = True
     db_ping_thread.start()
 
+    # Запускаем бота в отдельном потоке, чтобы основной поток мог обслуживать Flask
+    logger.info("Запуск телеграм-бота...")
+    application.run_in_thread() # ИСПРАВЛЕНО
+
     logger.info("Запуск веб-сервера Flask для поддержания активности Render...")
     run_flask() # Это заблокирует основной поток и будет отвечать на запросы Render
 
-if __name__ == "__main__": # ИСПРАВЛЕНО: Changed name to __name__
+if __name__ == "__main__":
     main_logic()
