@@ -309,7 +309,6 @@ async def add_debt_save(update: Update, context: ContextTypes.DEFAULT_TYPE, is_s
     return ConversationHandler.END
 
 # --- 💸 ДИАЛОГ: ВЕРНУТЬ ДОЛГ ---
-@group_only
 async def repay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer()
     try: await query.message.delete()
@@ -345,9 +344,10 @@ async def repay_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await update.message.delete()
         except BadRequest: pass
         db.add_transaction(update.effective_chat.id, context.user_data['debtor_id'], context.user_data['creditor_id'], amount, "Погашение долга")
+        # ✅ ИСПРАВЛЕНИЕ SyntaxError: Эти строки должны быть внутри блока try
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=context.user_data['dialog_message_id'])
-    await send_main_menu(update.effective_chat.id, context)
-    return ConversationHandler.END
+        await send_main_menu(update.effective_chat.id, context)
+        return ConversationHandler.END
     except (ValueError, TypeError):
         await update.message.reply_text("⚠️ Введите положительное число.", quote=True)
         return REPAY_GET_AMOUNT
@@ -561,14 +561,12 @@ def home():
 
 @app.post(f"/{TELEGRAM_WEBHOOK_PATH}")
 async def telegram_webhook_handler():
-    # ✅ Убедитесь, что Application был инициализирован, иначе не сможем обрабатывать
-    global application # ✅ Добавил global для application, хотя по логике он уже должен быть инициализирован
+    global application
     if application is None:
         logger.error("Telegram Application не инициализирован для вебхуков. Попытка инициализации.")
-        # ✅ Попытка инициализации бота, если он каким-то образом не был инициализирован (хотя init_bot должна была это сделать)
         try:
             await init_bot()
-            if application is None: # Если init_bot() все равно не помог
+            if application is None:
                 return "Error: Bot not ready after re-init", 500
         except Exception as e:
             logger.critical(f"Критическая ошибка при повторной инициализации бота: {e}", exc_info=True)
@@ -602,7 +600,7 @@ def ping_database():
 
 # --- 🚀 ЗАПУСК БОТА ---
 async def init_bot():
-    global db, application # ✅ Убедимся, что явно указываем глобальные переменные
+    global db, application
     
     if not TELEGRAM_BOT_TOKEN:
         logger.critical("!!! ОШИБКА: Токен не найден. Убедитесь, что он задан в переменных окружения.")
@@ -614,10 +612,7 @@ async def init_bot():
         logger.critical("!!! ОШИБКА: WEBHOOK_URL не найден. Добавьте WEBHOOK_URL в Environment Variables (URL вашего сервиса Render).")
         return
 
-    # Перемещаем инициализацию application до инициализации db, чтобы application был доступен для обработки ошибок db, если таковые возникнут
-    # Хотя в данном случае, application используется только для Telegram, а db - для базы.
-    # Главное, чтобы application был инициализирован до использования его методов.
-    if application is None: # Инициализируем application только если он еще не инициализирован (защита от повторной инициализации при re-init)
+    if application is None:
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         logger.info("Telegram Application builder запущен.")
 
@@ -626,14 +621,13 @@ async def init_bot():
         logger.info("Подключение к базе данных успешно установлено.")
     except ValueError as e:
         logger.critical(f"Ошибка инициализации базы данных: {e}")
-        application = None # Если DB упала, бот бесполезен, обнуляем application
+        application = None
         return
     except Exception as e:
         logger.critical(f"Неизвестная ошибка при подключении к базе данных: {e}")
-        application = None # Если DB упала, бот бесполезен, обнуляем application
+        application = None
         return
 
-    # Если application не инициализирован (например, из-за предыдущих ошибок), выходим
     if application is None:
         logger.critical("Application не был инициализирован из-за ошибок DB. Бот не может быть запущен.")
         return
@@ -693,9 +687,7 @@ async def init_bot():
     logger.info(f"Установка нового вебхука: {full_webhook_url}")
     await application.bot.set_webhook(url=full_webhook_url)
 
-    # ✅ ИСПРАВЛЕНИЕ: Вызываем post_init() для подготовки Application
-    # но только после того, как все обработчики добавлены и Application готов
-    await application.post_init() 
+    await application.post_init()
     
     logger.info("Telegram бот успешно настроен. Flask приложение будет обслуживаться Gunicorn.")
 
