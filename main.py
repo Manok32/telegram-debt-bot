@@ -1,13 +1,11 @@
 import logging
-import sqlite3 # Оставлено для совместимости, но не используется напрямую с Postgres
+import sqlite3
 import os
 from datetime import datetime, timezone
 from collections import defaultdict
 from functools import wraps
 import time
-from threading import Thread
 
-# ✅ ИСПРАВЛЕНИЕ: Импортируем psycopg2 и urlparse здесь
 import psycopg2
 from urllib.parse import urlparse
 
@@ -432,8 +430,28 @@ async def history_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not transactions:
         await query.answer("История пуста.", show_alert=True)
         return
-    months = sorted(list({t[5].strftime("%Y-%m") for t in transactions}), reverse=True)
-    keyboard = [[InlineKeyboardButton(f"{RUSSIAN_MONTHS_NOM[datetime.strptime(m, '%Y-%m').month]} {datetime.strptime(m, '%Y-%m').year}", callback_data=f"history_show_{m}")] for m in months]
+    
+    # ✅ ИСПРАВЛЕНО: Убедимся, что t[5] является datetime объектом перед форматированием
+    months = set()
+    for t in transactions:
+        if isinstance(t[5], datetime):
+            months.add(t[5].strftime("%Y-%m"))
+        else:
+            logger.warning(f"Transaction timestamp is not a datetime object, attempting to parse: {t[5]}")
+            try:
+                parsed_dt = datetime.fromisoformat(str(t[5]))
+                months.add(parsed_dt.strftime("%Y-%m"))
+            except ValueError:
+                logger.error(f"Failed to parse timestamp to datetime for history menu: {t[5]}")
+                # Пропускаем эту запись, чтобы не ломать меню
+                continue
+
+    sorted_months = sorted(list(months), reverse=True)
+    keyboard = []
+    for m in sorted_months:
+        dt_object = datetime.strptime(m, '%Y-%m')
+        keyboard.append([InlineKeyboardButton(f"{RUSSIAN_MONTHS_NOM[dt_object.month]} {dt_object.year}", callback_data=f"history_show_{m}")])
+    
     await query.message.edit_text("Выберите месяц:", reply_markup=InlineKeyboardMarkup(keyboard + [[InlineKeyboardButton(f"{EMOJI['back']} Назад в меню", callback_data="back_to_menu")]]))
     await query.answer()
 
@@ -442,18 +460,38 @@ async def history_show_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     query, chat_id = update.callback_query, update.effective_chat.id
     year_month = query.data.split('_')[-1]
     year, month = map(int, year_month.split('-'))
-    transactions = [tx for tx in db.get_all_transactions(chat_id) if tx[5].year == year and tx[5].month == month]
-    text = f"*{EMOJI['history']} История за {escape_markdown(RUSSIAN_MONTHS_NOM[month])} {year}*\n\n"
+
+    # ✅ ИСПРАВЛЕНО: Фильтруем транзакции, чтобы убедиться, что t[5] это datetime
+    transactions = [tx for tx in db.get_all_transactions(chat_id) if isinstance(tx[5], datetime) and tx[5].year == year and tx[5].month == month]
+    
+    text_header = f"*{EMOJI['history']} История за {escape_markdown(RUSSIAN_MONTHS_NOM[month])} {year}*\n\n"
+    text_body = ""
+
     if not transactions:
-        text += "В этом месяце операций не было."
+        text_body += escape_markdown("В этом месяце операций не было.") + "\n"
     else:
         for _, c_id, d_id, amount, comment, ts in transactions:
-            date = ts.strftime('%d.%m')
+            # ✅ ИСПРАВЛЕНО: Гарантируем, что date_str экранирован
+            date_str = escape_markdown(ts.strftime('%d.%m'))
+            amount_str = escape_markdown(f'{amount:.2f}')
+            
+            # ✅ ИСПРАВЛЕНО: Уточненная логика отображения погашения
             if comment == "Погашение долга":
-                text += f"`{date}`: {get_user_mention(d_id, chat_id)} погасил(а) долг {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH*\n"
+                # d_id - это тот, кто вернул; c_id - тот, кому вернули (для погашения)
+                text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} погасил(а) долг {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*\n"
             else:
-                text += f"`{date}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{escape_markdown(f'{amount:.2f}')} UAH* ({escape_markdown(comment)})\n"
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]), parse_mode=constants.ParseMode.MARKDOWN_V2)
+                # c_id - это кредитор; d_id - это должник
+                comment_escaped = escape_markdown(comment if comment is not None else "") # Гарантируем, что comment - строка
+                final_comment_part = f" ({comment_escaped})" if comment_escaped else ""
+                text_body += f"`{date_str}`: {get_user_mention(d_id, chat_id)} занял(а) у {get_user_mention(c_id, chat_id)} на *{amount_str} UAH*{final_comment_part}\n"
+    
+    final_text = text_header + text_body
+
+    await query.message.edit_text(
+        final_text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{EMOJI['back']} К месяцам", callback_data="history_menu")]]),
+        parse_mode=constants.ParseMode.MARKDOWN_V2
+    )
     await query.answer()
 
 # --- ✅ КОМАНДА ДЛЯ ОЧИСТКИ ИСТОРИИ (ТОЛЬКО ДЛЯ АДМИНА) ---
@@ -492,7 +530,8 @@ async def clear_transactions_confirm(update: Update, context: ContextTypes.DEFAU
 # --- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Exception while handling an update:", exc_info=context.error)
-    if update.effective_message:
+    # Пытаемся отправить сообщение об ошибке, если есть куда
+    if update and update.effective_message:
         try:
             await update.effective_message.reply_text(
                 "Произошла непредвиденная ошибка. Попробуйте снова.\n"
@@ -500,6 +539,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         except BadRequest:
             logger.error("Failed to send error message to user, original message deleted or inaccessible.")
+    else:
+        logger.error("Error occurred, but no effective message to reply to.")
 
 
 # --- Flask для поддержания активности на Render ---
@@ -518,12 +559,15 @@ def ping_database():
     while True:
         try:
             logger.info("[DB Ping] Sending keep-alive query...")
-            db.execute("SELECT 1")
-            logger.info("[DB Ping] Keep-alive query successful.")
+            if db: # Проверяем, что db инициализирован
+                db.execute("SELECT 1")
+                logger.info("[DB Ping] Keep-alive query successful.")
+            else:
+                logger.warning("[DB Ping] DB object not yet initialized. Skipping ping.")
         except Exception as e:
             logger.error(f"[DB Ping] Error during keep-alive query: {e}")
             try:
-                db._connect()
+                if db: db._connect() # Попытка переподключиться
             except Exception as reconnect_e:
                 logger.error(f"[DB Ping] Failed to reconnect to DB: {reconnect_e}")
         time.sleep(600)
